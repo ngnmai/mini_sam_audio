@@ -1,0 +1,23 @@
+"""
+Requirements for Mini-SAM-Audio model compression pipeline.
+
+This file is maintained separately from pyproject.toml for visibility
+into the model compression dependencies.
+"""
+
+# Core dependencies (from sam-audio pyproject.toml, excluding torch stack)
+audiobox_aesthetics
+einops
+laion-clap @ git+https://github.com/lematt1991/CLAP.git
+pydub
+perception-models @ git+https://github.com/facebookresearch/perception_models@unpin-deps
+imagebind @ git+https://github.com/facebookresearch/ImageBind.git
+dacvae @ git+https://github.com/facebookresearch/dacvae.git
+torchcodec
+torchdiffeq
+
+# Compression-specific dependencies (to be added as needed)
+# Examples:
+# pytorch-lightning>=2.0.0  # For training pipelines
+# optuna  # For hyperparameter optimization
+# tensorboard  # For logging and visualization
