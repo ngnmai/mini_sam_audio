@@ -6,14 +6,14 @@ Project setup for the Mini-SAM-Audio model compression pipeline.
 
 ```
 mini_sam_audio/
-├── sam-audio/           # SAM-Audio base model (submodule)
-├── src/                 # Main source code
-│   └── mini_sam_audio/
-│       ├── __init__.py
-│       ├── compression/       # Model compression pipeline
-│       │   └── __init__.py
-│       └── utils/             # Utility functions
-│           └── __init__.py
+├── submodule/
+│   └── sam-audio/       # SAM-Audio base model (submodule)
+├── mini_sam_audio/      # Main source code
+│   ├── __init__.py
+│   ├── compression/     # Model compression pipeline
+│   │   └── __init__.py
+│   └── utils/           # Utility functions
+│       └── __init__.py
 ├── pyproject.toml       # Project metadata and dependencies
 ├── requirements.txt     # Detailed dependency list
 └── README.md           # This file

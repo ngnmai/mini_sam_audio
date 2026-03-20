@@ -12,7 +12,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "sam-audio @ file://./sam-audio",
+    "sam-audio @ file://./submodule/sam-audio",
 ]
 
 [project.urls]
@@ -20,7 +20,7 @@ Homepage = "https://github.com/facebookresearch/sam-audio"
 Repository = "https://github.com/facebookresearch/sam-audio"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
 include = ["mini_sam_audio*"]
 
 [tool.setuptools.package-data]

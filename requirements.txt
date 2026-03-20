@@ -15,9 +15,7 @@ imagebind @ git+https://github.com/facebookresearch/ImageBind.git
 dacvae @ git+https://github.com/facebookresearch/dacvae.git
 torchcodec
 torchdiffeq
+sam3 @ git+https://github.com/facebookresearch/sam3.git
 
-# Compression-specific dependencies (to be added as needed)
-# Examples:
-# pytorch-lightning>=2.0.0  # For training pipelines
-# optuna  # For hyperparameter optimization
-# tensorboard  # For logging and visualization
+
+
