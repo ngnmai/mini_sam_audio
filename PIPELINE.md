@@ -1,6 +1,8 @@
 # Mini-SAM-Audio Project Structure
 
 Project setup for the Mini-SAM-Audio model compression pipeline.
+WORK IN PROGRESS 
+THIS IS ONLY FOR DEV NOTE
 
 ## Directory Structure
 
@@ -28,14 +30,11 @@ mini_sam_audio/
 ### Setup
 
 1. Install the project in development mode with SAM-Audio:
+
 ```bash
-cd /home/mai/STUDY/msc_thesis/mini_sam_audio
+pip install -r requirements.txt
 pip install -e .
 ```
-
-This will install:
-- The `mini_sam_audio` package
-- SAM-Audio from the local submodule with all its dependencies
 
 ## Project Goals
 
