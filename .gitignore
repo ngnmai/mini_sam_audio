@@ -1,3 +1,7 @@
 __pycache__/
 .venv
 .DS_Store
+venv/
+.egg-info/
+data/vggsound_20k/
+bash/
