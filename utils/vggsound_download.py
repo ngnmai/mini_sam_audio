@@ -4,7 +4,7 @@ import subprocess
 import pandas as pd
 from tqdm import tqdm
 
-CSV_PATH = "vggsound.csv"
+CSV_PATH = "assets/vgg/vggsound.csv"
 OUTPUT_DIR = "vggsound_20k"
 TARGET_TOTAL = 20000
 
