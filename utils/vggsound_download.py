@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 CSV_PATH = "assets/vgg/vggsound.csv"
 OUTPUT_DIR = "vggsound_20k"
-TARGET_TOTAL = 20000
+TARGET_TOTAL = 100
 
 
 for split in ["train", "test"]:
@@ -117,7 +117,11 @@ with tqdm(total=TARGET_TOTAL) as pbar:
 
                 total_count += 1
                 pbar.update(1)
+                
+                # Log checkpoint every 10 videos
+                if total_count % 10 == 0:
 
+                    print(f"CHECKPOINT: {total_count} videos downloaded (Train: {train_count}, Test: {test_count})")
 
 print("\n========== DONE ==========")
 print(f"Train clips: {train_count}")
