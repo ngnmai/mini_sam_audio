@@ -5,3 +5,4 @@ venv/
 .egg-info/
 data/vggsound_20k/
 bash/
+.copilot-tracking/

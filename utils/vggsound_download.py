@@ -8,6 +8,12 @@ CSV_PATH = "assets/vgg/vggsound.csv"
 OUTPUT_DIR = "vggsound_20k"
 TARGET_TOTAL = 100
 
+# Detect available downloader (prefer curl, then wget). Falls back to yt-dlp.
+def _has_command(cmd):
+    return subprocess.run(["which", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+USE_CURL = _has_command("curl")
+USE_WGET = _has_command("wget")
 
 for split in ["train", "test"]:
     os.makedirs(f"{OUTPUT_DIR}/{split}/video", exist_ok=True)
@@ -40,19 +46,28 @@ def download_clip(youtube_id, start_sec, split):
     url = f"https://www.youtube.com/watch?v={youtube_id}"
 
     try:
-        # Download video
-        subprocess.run([
-            "yt-dlp",
-            "-f", "mp4",
-            "-o", tmp_video,
-            url
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Resolve a direct media URL first. If the video is unavailable, hidden, or removed,
+        # yt-dlp returns a non-zero status and we skip this item.
+        res = subprocess.run(["yt-dlp", "-f", "mp4", "-g", url], capture_output=True, text=True)
+        if res.returncode != 0 or not res.stdout.strip():
+            return False
 
-        if not os.path.exists(tmp_video):
+        direct_url = res.stdout.strip().splitlines()[0]
+
+        # Download the resolved media URL using curl or wget.
+        if USE_CURL:
+            download_cmd = ["curl", "-L", "--fail", "--silent", "--show-error", "-o", tmp_video, direct_url]
+        elif USE_WGET:
+            download_cmd = ["wget", "--quiet", "-O", tmp_video, direct_url]
+        else:
+            return False
+
+        download_result = subprocess.run(download_cmd)
+        if download_result.returncode != 0 or not os.path.exists(tmp_video):
             return False
 
         # Trim video (NO AUDIO)
-        subprocess.run([
+        trim_result = subprocess.run([
             "ffmpeg",
             "-y",
             "-ss", str(start_sec),
@@ -62,9 +77,11 @@ def download_clip(youtube_id, start_sec, split):
             "-c:v", "libx264",
             video_out
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if trim_result.returncode != 0 or not os.path.exists(video_out):
+            return False
 
         # Extract audio ONLY
-        subprocess.run([
+        audio_result = subprocess.run([
             "ffmpeg",
             "-y",
             "-ss", str(start_sec),
@@ -76,6 +93,8 @@ def download_clip(youtube_id, start_sec, split):
             "-ac", "1",
             audio_out
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if audio_result.returncode != 0 or not os.path.exists(audio_out):
+            return False
 
         os.remove(tmp_video)
         return True
