@@ -1,9 +1,3 @@
-"""
-Requirements for Mini-SAM-Audio model compression pipeline.
-
-This file is maintained separately from pyproject.toml for visibility
-into the model compression dependencies.
-"""
 
 # Core dependencies (from sam-audio pyproject.toml, excluding torch stack)
 audiobox_aesthetics
@@ -16,6 +10,7 @@ dacvae @ git+https://github.com/facebookresearch/dacvae.git
 torchcodec
 torchdiffeq
 sam3 @ git+https://github.com/facebookresearch/sam3.git
+ultralytics
 
 
 

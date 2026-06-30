@@ -6,3 +6,5 @@ venv/
 data/vggsound_20k/
 bash/
 .copilot-tracking/
+assets/vgg/vggsound_20k/
+assets/vgg/vggsound_20k_2/

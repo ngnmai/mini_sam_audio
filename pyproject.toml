@@ -13,6 +13,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "sam-audio @ file://./submodule/sam-audio",
+    "ultralytics",
 ]
 
 [project.urls]
