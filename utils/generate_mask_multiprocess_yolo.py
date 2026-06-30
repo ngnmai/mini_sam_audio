@@ -179,8 +179,21 @@ def process_video(video_file, model, device):
             if prediction.masks is None or prediction.masks.data is None:
                 mask = np.zeros((height, width), dtype=bool)
             else:
-                mask_tensor = prediction.masks.data.detach().cpu() > 0.5
-                mask = mask_tensor.any(dim=0).numpy()
+                mask_array = prediction.masks.data.detach().cpu().numpy()
+                if mask_array.ndim == 3:
+                    mask = np.any(mask_array > 0.5, axis=0)
+                elif mask_array.ndim == 2:
+                    mask = mask_array > 0.5
+                else:
+                    mask = np.zeros((height, width), dtype=bool)
+
+                if mask.shape != (height, width):
+                    mask = cv2.resize(
+                        mask.astype(np.uint8),
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST,
+                    ).astype(bool)
+
             outputs.append(mask.astype(bool))
     finally:
         capture.release()
