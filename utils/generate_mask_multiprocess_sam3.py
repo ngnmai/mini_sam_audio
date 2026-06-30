@@ -1,9 +1,5 @@
-# This script was modified from https://github.com/facebookresearch/sam-audio/blob/main/examples/visual_prompting.ipynb
-import tempfile
-from io import BytesIO
-from pathlib import Path
-import os
 import subprocess
+from pathlib import Path
 from argparse import ArgumentParser
 
 import cv2
@@ -15,6 +11,17 @@ from torchcodec.decoders import VideoDecoder
 from tqdm import trange
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".webm")
+
+
+def read_environment() -> dict[str, str]:
+    environment = {}
+    output = subprocess.check_output(["env"], text=True)
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        environment[key] = value
+    return environment
 
 
 def parse_args():
@@ -34,47 +41,51 @@ def setup_distributed():
     if not dist.is_available():
         return 0, 1, 0
 
-    if "SLURM_PROCID" in os.environ:
-        os.environ.setdefault("RANK", os.environ["SLURM_PROCID"])
-        os.environ.setdefault("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1"))
-        os.environ.setdefault("LOCAL_RANK", os.environ.get("SLURM_LOCALID", os.environ["SLURM_PROCID"]))
-        os.environ.setdefault("MASTER_ADDR", _get_slurm_master_addr())
-        os.environ.setdefault("MASTER_PORT", _get_slurm_master_port())
+    environment = read_environment()
+    rank = int(environment.get("SLURM_PROCID", environment.get("RANK", "0")))
+    world_size = int(environment.get("SLURM_NTASKS", environment.get("WORLD_SIZE", "1")))
+    local_rank = int(environment.get("SLURM_LOCALID", environment.get("LOCAL_RANK", str(rank))))
+    master_addr = _get_slurm_master_addr(environment)
+    master_port = _get_slurm_master_port(environment)
 
     if dist.is_initialized():
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-    elif "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        dist.init_process_group(backend="nccl", init_method="env://")
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
     else:
-        rank = 0
-        world_size = 1
+        dist.init_process_group(
+            backend="nccl",
+            init_method=f"tcp://{master_addr}:{master_port}",
+            rank=rank,
+            world_size=world_size,
+        )
 
-    local_rank = int(os.environ.get("LOCAL_RANK", rank))
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
     return rank, world_size, local_rank
 
 
-def _get_slurm_master_addr():
-    nodelist = os.environ.get("SLURM_NODELIST")
+def _get_env(environment: dict[str, str], name: str, default: str | None = None) -> str | None:
+    return environment.get(name, default)
+
+
+def _get_slurm_master_addr(environment: dict[str, str]):
+    nodelist = _get_env(environment, "SLURM_NODELIST")
     if not nodelist:
-        return os.environ.get("MASTER_ADDR", "127.0.0.1")
+        return _get_env(environment, "MASTER_ADDR", "127.0.0.1")
 
     try:
         host = subprocess.check_output(["scontrol", "show", "hostnames", nodelist], text=True).splitlines()[0]
         return host.strip()
     except Exception:
-        return os.environ.get("MASTER_ADDR", "127.0.0.1")
+        return _get_env(environment, "MASTER_ADDR", "127.0.0.1")
 
 
-def _get_slurm_master_port():
-    if "MASTER_PORT" in os.environ:
-        return os.environ["MASTER_PORT"]
+def _get_slurm_master_port(environment: dict[str, str]):
+    existing_port = _get_env(environment, "MASTER_PORT")
+    if existing_port is not None:
+        return existing_port
 
-    job_id = os.environ.get("SLURM_JOB_ID")
+    job_id = _get_env(environment, "SLURM_JOB_ID")
     if job_id is None:
         return "29500"
 
