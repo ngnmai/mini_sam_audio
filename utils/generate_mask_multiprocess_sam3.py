@@ -7,8 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from sam3.model_builder import build_sam3_video_predictor
-from torchcodec.decoders import VideoDecoder
-from tqdm import trange
+from tqdm import tqdm
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".webm")
 
@@ -117,6 +116,34 @@ def load_model(local_rank):
     return predictor
 
 
+def open_video_capture(video_file):
+    capture = cv2.VideoCapture(str(video_file))
+    if not capture.isOpened():
+        raise RuntimeError(f"Failed to open video file: {video_file}")
+    return capture
+
+
+def get_video_metadata(video_file):
+    capture = open_video_capture(video_file)
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        return capture, width, height, fps, frame_count
+    except Exception:
+        capture.release()
+        raise
+
+
+def iter_video_frames(capture):
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        yield frame
+
+
 def save_mask_video(mask_frames, output_file, fps, width, height):
     output_file.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -139,9 +166,7 @@ def save_mask_video(mask_frames, output_file, fps, width, height):
 
 
 def process_video(video_file, video_predictor, prompt):
-    decoder = VideoDecoder(video_file)
-    height, width = decoder.metadata.height, decoder.metadata.width
-    fps = float(getattr(decoder.metadata, "average_fps", None) or getattr(decoder.metadata, "frame_rate", None) or 30.0)
+    capture, width, height, fps, frame_count = get_video_metadata(video_file)
 
     predictor = video_predictor
     response = predictor.handle_request(
@@ -152,27 +177,32 @@ def process_video(video_file, video_predictor, prompt):
     )
     session_id = response["session_id"]
     outputs = []
-    for frame_index in trange(len(decoder), desc=video_file.name, leave=False):
-        response = predictor.handle_request(
-            request={
-                "type": "add_prompt",
-                "session_id": session_id,
-                "frame_index": frame_index,
-                "text": prompt,
-            }
-        )
-        output = response["outputs"]
-        mask = output["out_binary_masks"]
-        if mask.shape[0] == 0:
-            if frame_index > 0:
-                mask = outputs[-1]
+    try:
+        for frame_index, _frame in enumerate(
+            tqdm(iter_video_frames(capture), total=frame_count, desc=video_file.name, leave=False)
+        ):
+            response = predictor.handle_request(
+                request={
+                    "type": "add_prompt",
+                    "session_id": session_id,
+                    "frame_index": frame_index,
+                    "text": prompt,
+                }
+            )
+            output = response["outputs"]
+            mask = output["out_binary_masks"]
+            if mask.shape[0] == 0:
+                if frame_index > 0:
+                    mask = outputs[-1]
+                else:
+                    mask = np.zeros((height, width), dtype=bool)
             else:
-                mask = np.zeros((height, width), dtype=bool)
-        else:
-            mask = np.any(mask.astype(bool), axis=0)
-        outputs.append(mask.astype(bool))
+                mask = np.any(mask.astype(bool), axis=0)
+            outputs.append(mask.astype(bool))
+    finally:
+        capture.release()
 
-    return np.stack(outputs, axis=0), fps
+    return np.stack(outputs, axis=0), fps, width, height
 
 
 def generate_masks(data_root, split, num_videos, video_predictor, rank, world_size, prompt):
@@ -190,10 +220,9 @@ def generate_masks(data_root, split, num_videos, video_predictor, rank, world_si
     print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
     for video_file in assigned_videos:
         with torch.inference_mode():
-            mask_frames, fps = process_video(video_file, video_predictor, prompt)
-        decoder = VideoDecoder(video_file)
+            mask_frames, fps, width, height = process_video(video_file, video_predictor, prompt)
         output_file = mask_dir / f"{video_file.stem}.mp4"
-        save_mask_video(mask_frames, output_file, fps, decoder.metadata.width, decoder.metadata.height)
+        save_mask_video(mask_frames, output_file, fps, width, height)
         print(f"Rank {rank}: saved {output_file}")
 
     if dist.is_initialized():

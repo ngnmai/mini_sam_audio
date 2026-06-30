@@ -6,8 +6,7 @@ import cv2
 import numpy as np
 import torch
 import torch.distributed as dist
-from torchcodec.decoders import VideoDecoder
-from tqdm import trange
+from tqdm import tqdm
 
 from ultralytics import YOLO
 
@@ -119,6 +118,34 @@ def load_model(model_path, local_rank):
     return model
 
 
+def open_video_capture(video_file):
+    capture = cv2.VideoCapture(str(video_file))
+    if not capture.isOpened():
+        raise RuntimeError(f"Failed to open video file: {video_file}")
+    return capture
+
+
+def get_video_metadata(video_file):
+    capture = open_video_capture(video_file)
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        return capture, width, height, fps, frame_count
+    except Exception:
+        capture.release()
+        raise
+
+
+def iter_video_frames(capture):
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        yield frame
+
+
 def save_mask_video(mask_frames, output_file, fps, width, height):
     output_file.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -141,22 +168,24 @@ def save_mask_video(mask_frames, output_file, fps, width, height):
 
 
 def process_video(video_file, model, device):
-    decoder = VideoDecoder(video_file)
-    height, width = decoder.metadata.height, decoder.metadata.width
-    fps = float(getattr(decoder.metadata, "average_fps", None) or getattr(decoder.metadata, "frame_rate", None) or 30.0)
+    capture, width, height, fps, frame_count = get_video_metadata(video_file)
 
     outputs = []
-    for frame_index in trange(len(decoder), desc=video_file.name, leave=False):
-        frame = decoder[frame_index]
-        prediction = model.predict(frame, verbose=False, device=device)[0]
-        if prediction.masks is None or prediction.masks.data is None:
-            mask = np.zeros((height, width), dtype=bool)
-        else:
-            mask_tensor = prediction.masks.data.detach().cpu() > 0.5
-            mask = mask_tensor.any(dim=0).numpy()
-        outputs.append(mask.astype(bool))
+    try:
+        for frame_index, frame in enumerate(
+            tqdm(iter_video_frames(capture), total=frame_count, desc=video_file.name, leave=False)
+        ):
+            prediction = model.predict(frame, verbose=False, device=device)[0]
+            if prediction.masks is None or prediction.masks.data is None:
+                mask = np.zeros((height, width), dtype=bool)
+            else:
+                mask_tensor = prediction.masks.data.detach().cpu() > 0.5
+                mask = mask_tensor.any(dim=0).numpy()
+            outputs.append(mask.astype(bool))
+    finally:
+        capture.release()
 
-    return np.stack(outputs, axis=0), fps
+    return np.stack(outputs, axis=0), fps, width, height
 
 
 def generate_masks(data_root, split, num_videos, model, rank, world_size, device):
@@ -174,10 +203,9 @@ def generate_masks(data_root, split, num_videos, model, rank, world_size, device
     print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
     for video_file in assigned_videos:
         with torch.inference_mode():
-            mask_frames, fps = process_video(video_file, model, device)
-        decoder = VideoDecoder(video_file)
+            mask_frames, fps, width, height = process_video(video_file, model, device)
         output_file = mask_dir / f"{video_file.stem}.mp4"
-        save_mask_video(mask_frames, output_file, fps, decoder.metadata.width, decoder.metadata.height)
+        save_mask_video(mask_frames, output_file, fps, width, height)
         print(f"Rank {rank}: saved {output_file}")
 
     if dist.is_initialized():
