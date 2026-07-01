@@ -167,12 +167,13 @@ def save_mask_video(mask_frames, output_file, fps, width, height):
 
 def process_video(video_file, video_predictor, prompt):
     capture, width, height, fps, frame_count = get_video_metadata(video_file)
+    video_path = str(video_file)
 
     predictor = video_predictor
     response = predictor.handle_request(
         request={
             "type": "start_session",
-            "resource_path": video_file,
+            "resource_path": video_path,
         }
     )
     session_id = response["session_id"]
