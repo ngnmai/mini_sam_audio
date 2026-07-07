@@ -209,7 +209,7 @@ def process_video(video_file, video_predictor, prompt):
 def generate_masks(data_root, split, num_videos, video_predictor, rank, world_size, prompt):
     split_dir = Path(data_root) / split
     video_dir = split_dir / "video"
-    mask_dir = split_dir / "mask"
+    mask_dir = split_dir / "mask_sam3"
     if rank == 0:
         mask_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
