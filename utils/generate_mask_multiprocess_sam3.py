@@ -166,11 +166,9 @@ def save_mask_video(mask_frames, output_file, fps, width, height):
         writer.release()
 
 
-def process_video(video_file, local_rank, prompt):
+def process_video(video_file, predictor, prompt):
     capture, width, height, fps, frame_count = get_video_metadata(video_file)
     video_path = str(video_file)
-
-    predictor = load_model(local_rank)
     session_id = None
     outputs = []
     try:
@@ -178,6 +176,8 @@ def process_video(video_file, local_rank, prompt):
             request={
                 "type": "start_session",
                 "resource_path": video_path,
+                "offload_video_to_cpu": True,
+                "offload_state_to_cpu": True,
             }
         )
         session_id = response["session_id"]
@@ -233,14 +233,25 @@ def generate_masks(data_root, split, num_videos, rank, world_size, prompt):
 
     video_files = resolve_video_files(video_dir, num_videos)
     assigned_videos = video_files[rank::world_size]
+    predictor = load_model(local_rank=rank)
 
     print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
-    for video_file in assigned_videos:
-        with torch.inference_mode():
-            mask_frames, fps, width, height = process_video(video_file, rank, prompt)
-        output_file = mask_dir / f"{video_file.stem}.mp4"
-        save_mask_video(mask_frames, output_file, fps, width, height)
-        print(f"Rank {rank}: saved {output_file}")
+    try:
+        for video_file in assigned_videos:
+            with torch.inference_mode():
+                mask_frames, fps, width, height = process_video(video_file, predictor, prompt)
+            output_file = mask_dir / f"{video_file.stem}.mp4"
+            save_mask_video(mask_frames, output_file, fps, width, height)
+            del mask_frames
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"Rank {rank}: saved {output_file}")
+    finally:
+        del predictor
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if dist.is_initialized():
         dist.barrier()
