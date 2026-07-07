@@ -1,4 +1,5 @@
 import subprocess
+import gc
 from pathlib import Path
 from argparse import ArgumentParser
 
@@ -165,20 +166,21 @@ def save_mask_video(mask_frames, output_file, fps, width, height):
         writer.release()
 
 
-def process_video(video_file, video_predictor, prompt):
+def process_video(video_file, local_rank, prompt):
     capture, width, height, fps, frame_count = get_video_metadata(video_file)
     video_path = str(video_file)
 
-    predictor = video_predictor
-    response = predictor.handle_request(
-        request={
-            "type": "start_session",
-            "resource_path": video_path,
-        }
-    )
-    session_id = response["session_id"]
+    predictor = load_model(local_rank)
+    session_id = None
     outputs = []
     try:
+        response = predictor.handle_request(
+            request={
+                "type": "start_session",
+                "resource_path": video_path,
+            }
+        )
+        session_id = response["session_id"]
         for frame_index, _frame in enumerate(
             tqdm(iter_video_frames(capture), total=frame_count, desc=video_file.name, leave=False)
         ):
@@ -202,11 +204,25 @@ def process_video(video_file, video_predictor, prompt):
             outputs.append(mask.astype(bool))
     finally:
         capture.release()
+        if session_id is not None:
+            try:
+                predictor.handle_request(
+                    request={
+                        "type": "end_session",
+                        "session_id": session_id,
+                    }
+                )
+            except Exception:
+                pass
+        del predictor
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return np.stack(outputs, axis=0), fps, width, height
 
 
-def generate_masks(data_root, split, num_videos, video_predictor, rank, world_size, prompt):
+def generate_masks(data_root, split, num_videos, rank, world_size, prompt):
     split_dir = Path(data_root) / split
     video_dir = split_dir / "video"
     mask_dir = split_dir / "mask_sam3"
@@ -221,7 +237,7 @@ def generate_masks(data_root, split, num_videos, video_predictor, rank, world_si
     print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
     for video_file in assigned_videos:
         with torch.inference_mode():
-            mask_frames, fps, width, height = process_video(video_file, video_predictor, prompt)
+            mask_frames, fps, width, height = process_video(video_file, rank, prompt)
         output_file = mask_dir / f"{video_file.stem}.mp4"
         save_mask_video(mask_frames, output_file, fps, width, height)
         print(f"Rank {rank}: saved {output_file}")
@@ -233,8 +249,7 @@ def generate_masks(data_root, split, num_videos, video_predictor, rank, world_si
 if __name__ == "__main__":
     args = parse_args()
     rank, world_size, local_rank = setup_distributed()
-    video_predictor = load_model(local_rank)
-    generate_masks(args.data_root, args.split, args.num_videos, video_predictor, rank, world_size, args.prompt)
+    generate_masks(args.data_root, args.split, args.num_videos, rank, world_size, args.prompt)
 
     if dist.is_initialized():
         dist.destroy_process_group()
