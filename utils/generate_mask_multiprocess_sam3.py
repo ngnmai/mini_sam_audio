@@ -34,6 +34,12 @@ def parse_args():
         help='Number of videos to process or "all" for the full split.',
     )
     parser.add_argument("--prompt", default="The person on the left", help="Text prompt passed to SAM3.")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=640,
+        help="Square input size sent to SAM3; lower values reduce GPU memory use.",
+    )
     return parser.parse_args()
 
 
@@ -110,8 +116,8 @@ def resolve_video_files(video_dir, num_videos):
     return files
 
 
-def load_model(local_rank):
-    predictor = build_sam3_video_predictor()
+def load_model(local_rank, image_size):
+    predictor = build_sam3_video_predictor(image_size=image_size)
     if torch.cuda.is_available() and hasattr(predictor, "to"):
         predictor = predictor.to(f"cuda:{local_rank}")
     return predictor
@@ -222,7 +228,7 @@ def process_video(video_file, predictor, prompt):
     return np.stack(outputs, axis=0), fps, width, height
 
 
-def generate_masks(data_root, split, num_videos, rank, world_size, prompt):
+def generate_masks(data_root, split, num_videos, rank, world_size, prompt, image_size):
     split_dir = Path(data_root) / split
     video_dir = split_dir / "video"
     mask_dir = split_dir / "mask_sam3"
@@ -233,7 +239,7 @@ def generate_masks(data_root, split, num_videos, rank, world_size, prompt):
 
     video_files = resolve_video_files(video_dir, num_videos)
     assigned_videos = video_files[rank::world_size]
-    predictor = load_model(local_rank=rank)
+    predictor = load_model(local_rank=rank, image_size=image_size)
 
     print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
     try:
@@ -260,7 +266,15 @@ def generate_masks(data_root, split, num_videos, rank, world_size, prompt):
 if __name__ == "__main__":
     args = parse_args()
     rank, world_size, local_rank = setup_distributed()
-    generate_masks(args.data_root, args.split, args.num_videos, rank, world_size, args.prompt)
+    generate_masks(
+        args.data_root,
+        args.split,
+        args.num_videos,
+        rank,
+        world_size,
+        args.prompt,
+        args.image_size,
+    )
 
     if dist.is_initialized():
         dist.destroy_process_group()
