@@ -214,8 +214,9 @@ def process_video(video_file, predictor, prompt):
             try:
                 predictor.handle_request(
                     request={
-                        "type": "end_session",
+                        "type": "close_session",
                         "session_id": session_id,
+                        "run_gc_collect": True,
                     }
                 )
             except Exception:
