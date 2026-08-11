@@ -150,6 +150,11 @@ def setup_distributed() -> tuple[int, int, int]:
     return rank, world_size, local_rank
 
 
+def cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def collect_files(root: Path, suffix: str) -> dict[str, Path]:
     if not root.exists():
         raise FileNotFoundError(f"Directory does not exist: {root}")
@@ -279,46 +284,49 @@ def main() -> None:
     args = parse_args()
     rank, world_size, local_rank = setup_distributed()
 
-    output_root = build_output_root(args.video_root, args.output_root)
-    ensure_output_layout(output_root)
+    try:
+        output_root = build_output_root(args.video_root, args.output_root)
+        ensure_output_layout(output_root)
 
-    if dist.is_initialized():
-        dist.barrier()
-
-    samples = resolve_samples(args.audio_root, args.mask_root, args.video_root)
-    assigned_samples = samples[rank::world_size]
-
-    if not assigned_samples:
-        if rank == 0:
-            print("No samples assigned to this run.")
         if dist.is_initialized():
             dist.barrier()
-        return
 
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    model, processor = load_model(args.checkpoint_path, device)
+        samples = resolve_samples(args.audio_root, args.mask_root, args.video_root)
+        assigned_samples = samples[rank::world_size]
 
-    if rank == 0:
-        print(f"Found {len(samples)} matched sample(s). Writing outputs to: {output_root}")
-        print(f"Using checkpoint: {args.checkpoint_path}")
+        if not assigned_samples:
+            if rank == 0:
+                print("No samples assigned to this run.")
+            if dist.is_initialized():
+                dist.barrier()
+            return
 
-    batches = iterate_batches(assigned_samples, args.batch_size)
-    progress = tqdm(batches, desc=f"rank {rank}", disable=rank != 0)
+        device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        model, processor = load_model(args.checkpoint_path, device)
 
-    for batch_samples in progress:
-        process_batch(
-            batch_samples=batch_samples,
-            model=model,
-            processor=processor,
-            device=device,
-            output_root=output_root,
-            reranking_candidates=args.reranking_candidates,
-            predict_spans=args.predict_spans,
-            overwrite=args.overwrite,
-        )
+        if rank == 0:
+            print(f"Found {len(samples)} matched sample(s). Writing outputs to: {output_root}")
+            print(f"Using checkpoint: {args.checkpoint_path}")
 
-    if dist.is_initialized():
-        dist.barrier()
+        batches = iterate_batches(assigned_samples, args.batch_size)
+        progress = tqdm(batches, desc=f"rank {rank}", disable=rank != 0)
+
+        for batch_samples in progress:
+            process_batch(
+                batch_samples=batch_samples,
+                model=model,
+                processor=processor,
+                device=device,
+                output_root=output_root,
+                reranking_candidates=args.reranking_candidates,
+                predict_spans=args.predict_spans,
+                overwrite=args.overwrite,
+            )
+
+        if dist.is_initialized():
+            dist.barrier()
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
