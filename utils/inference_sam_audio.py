@@ -87,6 +87,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Recompute outputs even when target/residual files already exist.",
     )
+    parser.add_argument(
+        "--chunk-index",
+        type=int,
+        default=0,
+        help="Zero-based chunk index for job-array style partitioning of the sample list.",
+    )
+    parser.add_argument(
+        "--num-chunks",
+        type=int,
+        default=1,
+        help="Total number of chunks used to split the sample list across batch jobs.",
+    )
     return parser.parse_args()
 
 
@@ -280,6 +292,15 @@ def iterate_batches(samples: list[SamplePair], batch_size: int) -> list[list[Sam
     return [samples[index : index + batch_size] for index in range(0, len(samples), batch_size)]
 
 
+def select_chunk(samples: list[SamplePair], chunk_index: int, num_chunks: int) -> list[SamplePair]:
+    if num_chunks <= 0:
+        raise ValueError("--num-chunks must be a positive integer.")
+    if chunk_index < 0 or chunk_index >= num_chunks:
+        raise ValueError("--chunk-index must be in the range [0, --num-chunks).")
+
+    return samples[chunk_index::num_chunks]
+
+
 def main() -> None:
     args = parse_args()
     rank, world_size, local_rank = setup_distributed()
@@ -292,7 +313,8 @@ def main() -> None:
             dist.barrier()
 
         samples = resolve_samples(args.audio_root, args.mask_root, args.video_root)
-        assigned_samples = samples[rank::world_size]
+        chunked_samples = select_chunk(samples, args.chunk_index, args.num_chunks)
+        assigned_samples = chunked_samples[rank::world_size]
 
         if not assigned_samples:
             if rank == 0:
@@ -305,7 +327,11 @@ def main() -> None:
         model, processor = load_model(args.checkpoint_path, device)
 
         if rank == 0:
-            print(f"Found {len(samples)} matched sample(s). Writing outputs to: {output_root}")
+            print(
+                f"Found {len(samples)} matched sample(s). "
+                f"Chunk {args.chunk_index + 1}/{args.num_chunks} has {len(chunked_samples)} sample(s). "
+                f"Writing outputs to: {output_root}"
+            )
             print(f"Using checkpoint: {args.checkpoint_path}")
 
         batches = iterate_batches(assigned_samples, args.batch_size)
