@@ -35,7 +35,7 @@ if SAM_AUDIO_ROOT.exists():
 from sam_audio import SAMAudio, SAMAudioProcessor
 
 
-DEFAULT_CHECKPOINT_PATH = "facebook/sam-audio-large-tv"
+DEFAULT_CHECKPOINT_PATH = "facebook/sam-audio-small"
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_NUM_WORKERS = 0
 DEFAULT_RERANKING_CANDIDATES = 1

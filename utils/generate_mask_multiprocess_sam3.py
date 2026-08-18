@@ -33,12 +33,22 @@ def parse_args():
         default="all",
         help='Number of videos to process or "all" for the full split.',
     )
-    parser.add_argument("--prompt", default="The person on the left", help="Text prompt passed to SAM3.")
     parser.add_argument(
-        "--image-size",
+        "--prompt",
+        default=None,
+        help="Optional text prompt passed to SAM3. Leave unset for no text prompt.",
+    )
+    parser.add_argument(
+        "--chunk-index",
         type=int,
-        default=640,
-        help="Square input size sent to SAM3; lower values reduce GPU memory use.",
+        default=0,
+        help="Zero-based chunk index for job-array style partitioning of the video list.",
+    )
+    parser.add_argument(
+        "--num-chunks",
+        type=int,
+        default=1,
+        help="Total number of chunks used to split the video list across batch jobs.",
     )
     return parser.parse_args()
 
@@ -54,16 +64,17 @@ def setup_distributed():
     master_addr = _get_slurm_master_addr(environment)
     master_port = _get_slurm_master_port(environment)
 
-    if dist.is_initialized():
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-    else:
+    if world_size > 1 and not dist.is_initialized():
         dist.init_process_group(
-            backend="nccl",
+            backend="nccl" if torch.cuda.is_available() else "gloo",
             init_method=f"tcp://{master_addr}:{master_port}",
             rank=rank,
             world_size=world_size,
         )
+
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
 
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -116,8 +127,17 @@ def resolve_video_files(video_dir, num_videos):
     return files
 
 
-def load_model(local_rank, image_size):
-    predictor = build_sam3_video_predictor(image_size=image_size)
+def select_chunk(video_files, chunk_index, num_chunks):
+    if num_chunks <= 0:
+        raise ValueError("--num-chunks must be a positive integer.")
+    if chunk_index < 0 or chunk_index >= num_chunks:
+        raise ValueError("--chunk-index must be in the range [0, --num-chunks).")
+
+    return video_files[chunk_index::num_chunks]
+
+
+def load_model(local_rank):
+    predictor = build_sam3_video_predictor()
     if torch.cuda.is_available() and hasattr(predictor, "to"):
         predictor = predictor.to(f"cuda:{local_rank}")
     return predictor
@@ -190,14 +210,13 @@ def process_video(video_file, predictor, prompt):
         for frame_index, _frame in enumerate(
             tqdm(iter_video_frames(capture), total=frame_count, desc=video_file.name, leave=False)
         ):
-            response = predictor.handle_request(
-                request={
-                    "type": "add_prompt",
-                    "session_id": session_id,
-                    "frame_index": frame_index,
-                    "text": prompt,
-                }
-            )
+            request = {
+                "type": "add_prompt",
+                "session_id": session_id,
+                "frame_index": frame_index,
+                "text": prompt,
+            }
+            response = predictor.handle_request(request=request)
             output = response["outputs"]
             mask = output["out_binary_masks"]
             if mask.shape[0] == 0:
@@ -229,7 +248,7 @@ def process_video(video_file, predictor, prompt):
     return np.stack(outputs, axis=0), fps, width, height
 
 
-def generate_masks(data_root, split, num_videos, rank, world_size, prompt, image_size):
+def generate_masks(data_root, split, num_videos, rank, world_size, local_rank, prompt, chunk_index, num_chunks):
     split_dir = Path(data_root) / split
     video_dir = split_dir / "video"
     mask_dir = split_dir / "mask_sam3"
@@ -239,10 +258,26 @@ def generate_masks(data_root, split, num_videos, rank, world_size, prompt, image
         dist.barrier()
 
     video_files = resolve_video_files(video_dir, num_videos)
-    assigned_videos = video_files[rank::world_size]
-    predictor = load_model(local_rank=rank, image_size=image_size)
+    chunked_videos = select_chunk(video_files, chunk_index, num_chunks)
+    assigned_videos = chunked_videos[rank::world_size]
 
-    print(f"Rank {rank}: processing {len(assigned_videos)} of {len(video_files)} videos from {video_dir}")
+    if not assigned_videos:
+        if rank == 0:
+            print("No videos assigned to this run.")
+        if dist.is_initialized():
+            dist.barrier()
+        return
+
+    predictor = load_model(local_rank=local_rank)
+
+    if rank == 0:
+        print(
+            f"Found {len(video_files)} video(s). "
+            f"Chunk {chunk_index + 1}/{num_chunks} has {len(chunked_videos)} video(s)."
+        )
+        print(f"Writing masks to: {mask_dir}")
+
+    print(f"Rank {rank}: processing {len(assigned_videos)} of {len(chunked_videos)} videos from {video_dir}")
     try:
         for video_file in assigned_videos:
             with torch.inference_mode():
@@ -267,18 +302,21 @@ def generate_masks(data_root, split, num_videos, rank, world_size, prompt, image
 if __name__ == "__main__":
     args = parse_args()
     rank, world_size, local_rank = setup_distributed()
-    generate_masks(
-        args.data_root,
-        args.split,
-        args.num_videos,
-        rank,
-        world_size,
-        args.prompt,
-        args.image_size,
-    )
-
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    try:
+        generate_masks(
+            args.data_root,
+            args.split,
+            args.num_videos,
+            rank,
+            world_size,
+            local_rank,
+            args.prompt,
+            args.chunk_index,
+            args.num_chunks,
+        )
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 
