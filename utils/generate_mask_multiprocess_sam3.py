@@ -35,8 +35,8 @@ def parse_args():
     )
     parser.add_argument(
         "--prompt",
-        default=None,
-        help="Optional text prompt passed to SAM3. Leave unset for no text prompt.",
+        default="",
+        help='Text prompt passed to SAM3. Defaults to empty string ("") for visual prompting style.',
     )
     parser.add_argument(
         "--chunk-index",
@@ -196,7 +196,16 @@ def process_video(video_file, predictor, prompt):
     capture, width, height, fps, frame_count = get_video_metadata(video_file)
     video_path = str(video_file)
     session_id = None
-    outputs = []
+    if prompt is None:
+        prompt = ""
+
+    outputs = [None] * frame_count
+
+    def to_binary_mask(output_masks):
+        if output_masks.shape[0] == 0:
+            return np.zeros((height, width), dtype=bool)
+        return np.any(output_masks.astype(bool), axis=0)
+
     try:
         response = predictor.handle_request(
             request={
@@ -207,26 +216,36 @@ def process_video(video_file, predictor, prompt):
             }
         )
         session_id = response["session_id"]
-        for frame_index, _frame in enumerate(
-            tqdm(iter_video_frames(capture), total=frame_count, desc=video_file.name, leave=False)
-        ):
-            request = {
+        # SAM3 requires at least one prompt; use empty text to match SAM-Audio visual prompting style.
+        add_prompt_response = predictor.handle_request(
+            request={
                 "type": "add_prompt",
                 "session_id": session_id,
-                "frame_index": frame_index,
+                "frame_index": 0,
                 "text": prompt,
             }
-            response = predictor.handle_request(request=request)
-            output = response["outputs"]
-            mask = output["out_binary_masks"]
-            if mask.shape[0] == 0:
-                if frame_index > 0:
-                    mask = outputs[-1]
+        )
+        prompted_frame_index = int(add_prompt_response["frame_index"])
+        outputs[prompted_frame_index] = to_binary_mask(add_prompt_response["outputs"]["out_binary_masks"])
+
+        stream = predictor.handle_stream_request(
+            request={
+                "type": "propagate_in_video",
+                "session_id": session_id,
+                "propagation_direction": "forward",
+                "start_frame_index": 0,
+            }
+        )
+        for response in tqdm(stream, total=frame_count, desc=video_file.name, leave=False):
+            frame_index = int(response["frame_index"])
+            outputs[frame_index] = to_binary_mask(response["outputs"]["out_binary_masks"])
+
+        for frame_index in range(frame_count):
+            if outputs[frame_index] is None:
+                if frame_index > 0 and outputs[frame_index - 1] is not None:
+                    outputs[frame_index] = outputs[frame_index - 1]
                 else:
-                    mask = np.zeros((height, width), dtype=bool)
-            else:
-                mask = np.any(mask.astype(bool), axis=0)
-            outputs.append(mask.astype(bool))
+                    outputs[frame_index] = np.zeros((height, width), dtype=bool)
     finally:
         capture.release()
         if session_id is not None:
@@ -240,7 +259,6 @@ def process_video(video_file, predictor, prompt):
                 )
             except Exception:
                 pass
-        del predictor
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
