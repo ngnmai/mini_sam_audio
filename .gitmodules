@@ -4,3 +4,6 @@
 [submodule "submodule/CLIPSep"]
 	path = submodule/CLIPSep
 	url = https://github.com/sony/CLIPSep.git
+[submodule "submodule/DAVIS"]
+	path = submodule/DAVIS
+	url = https://github.com/WikiChao/DAVIS.git
