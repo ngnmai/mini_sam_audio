@@ -1,3 +1,6 @@
 [submodule "sam-audio"]
 	path = submodule/sam-audio
 	url = https://github.com/facebookresearch/sam-audio.git
+[submodule "submodule/CLIPSep"]
+	path = submodule/CLIPSep
+	url = https://github.com/sony/CLIPSep.git
