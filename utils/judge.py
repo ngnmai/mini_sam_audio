@@ -1,17 +1,28 @@
 import argparse
+import fcntl
+import json
 import os
 import subprocess
 from pathlib import Path
-
+import sys
+import pandas as pd
 import torch
 import torch.distributed as dist
-from sam_audio import SAMAudioJudgeModel, SAMAudioJudgeProcessor
 from tqdm import tqdm
 
 
 INPUT_SUFFIX = ".wav"
 TARGET_SUFFIX = "_target.wav"
+RESULTS_JSON_NAME = "judge_results.json"
+RESULTS_PARQUET_NAME = "judge_results.parquet"
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SAM_AUDIO_ROOT = PROJECT_ROOT / "submodule" / "sam-audio"
+
+if SAM_AUDIO_ROOT.exists():
+    sys.path.insert(0, str(SAM_AUDIO_ROOT))
+
+from sam_audio import SAMAudioJudgeModel, SAMAudioJudgeProcessor
 
 def read_environment() -> dict[str, str]:
     environment = {}
@@ -132,6 +143,38 @@ def iterate_batches(
     ]
 
 
+def resolve_result_dir(input_dir: Path, separated_dir: Path, result_dir_name: str) -> Path:
+    if input_dir.parent != separated_dir.parent:
+        raise ValueError(
+            "--result-dir-name requires --input-dir and --separated-dir to share the same parent directory, "
+            f"got {input_dir.parent} and {separated_dir.parent}."
+        )
+    return input_dir.parent / result_dir_name
+
+
+def append_results(records: list[dict], json_path: Path, parquet_path: Path) -> None:
+    if not records:
+        return
+
+    lock_path = json_path.with_suffix(json_path.suffix + ".lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            existing_records = []
+            if json_path.exists():
+                with open(json_path) as f:
+                    existing_records = json.load(f)
+            existing_records.extend(records)
+            with open(json_path, "w") as f:
+                json.dump(existing_records, f, indent=2)
+
+            existing_df = pd.read_parquet(parquet_path) if parquet_path.exists() else pd.DataFrame()
+            combined_df = pd.concat([existing_df, pd.DataFrame(records)], ignore_index=True)
+            combined_df.to_parquet(parquet_path, index=False)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch evaluation with SAM Audio Judge.")
     parser.add_argument("--input-dir", type=Path, required=True, help="Directory with original input .wav files.")
@@ -140,6 +183,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Directory with separated files. Uses only *_target.wav files.",
+    )
+    parser.add_argument(
+        "--result-dir-name",
+        required=True,
+        help=(
+            "Name of the folder (created next to --input-dir and --separated-dir, which must share a parent) "
+            f"used to store {RESULTS_JSON_NAME} and {RESULTS_PARQUET_NAME}."
+        ),
     )
     parser.add_argument(
         "--checkpoint",
@@ -185,6 +236,11 @@ def main() -> None:
         if not separated_dir.exists() or not separated_dir.is_dir():
             raise ValueError(f"Invalid separated directory: {separated_dir}")
 
+        result_dir = resolve_result_dir(input_dir, separated_dir, args.result_dir_name)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_json_path = result_dir / RESULTS_JSON_NAME
+        result_parquet_path = result_dir / RESULTS_PARQUET_NAME
+
         input_files, target_files = build_file_pairs(input_dir, separated_dir)
         chunk_inputs, chunk_targets = select_chunk(
             input_files,
@@ -228,6 +284,7 @@ def main() -> None:
             with torch.inference_mode():
                 result = model(**inputs)
 
+            batch_records = []
             for index, (input_path, target_path) in enumerate(zip(batch_inputs, batch_targets)):
                 print(f"\n[rank {rank}] Example")
                 print(f"  Input: {input_path.name}")
@@ -236,6 +293,17 @@ def main() -> None:
                 print(f"  Recall: {result.recall[index].item():.3f}")
                 print(f"  Precision: {result.precision[index].item():.3f}")
                 print(f"  Faithfulness: {result.faithfulness[index].item():.3f}")
+                batch_records.append(
+                    {
+                        "input": input_path.name,
+                        "separated": target_path.name,
+                        "overall": result.overall[index].item(),
+                        "recall": result.recall[index].item(),
+                        "precision": result.precision[index].item(),
+                        "faithfulness": result.faithfulness[index].item(),
+                    }
+                )
+            append_results(batch_records, result_json_path, result_parquet_path)
 
         if dist.is_initialized():
             dist.barrier()
