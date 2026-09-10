@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 
 MIXTURE_SUFFIX = ".wav"
-TARGET_SUFFIX = "__target.wav"
+TARGET_SUFFIX = "_target.wav"
 RESIDUAL_SUFFIX = "_residual.wav"
 DEFAULT_OUTPUT_DIRNAME = "audio_metrics"
 EPSILON = 1e-12
