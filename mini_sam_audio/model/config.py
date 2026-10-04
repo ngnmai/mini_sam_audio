@@ -71,7 +71,7 @@ class TransformerConfig:
         self,
         dim: int = 2048,
         n_heads: int = 16,
-        n_layers: int = 16,
+        n_layers: int = 6,
         dropout: float = 0.1,
         norm_eps: float = 1.0e-05,
         qk_norm: bool = True,

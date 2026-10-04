@@ -46,8 +46,8 @@ This project implements a model compression pipeline to:
 
 ## Next Steps
 
-- [ ] Implement model loading utilities
-- [ ] Set up student model
+- [x] Implement model loading utilities
+- [x] Set up student model
 - [ ] Add evaluation metrics
 - [ ] Create example compression scripts
 - [ ] Revisit installation requirements based on actual PyTorch needs

@@ -8,3 +8,6 @@ bash/
 .copilot-tracking/
 assets/vgg/vggsound_20k/
 assets/vgg/vggsound_20k_2/
+assets/vgg/vggsound_5k_fixed/
+assets/vgg/vggsound_10k_fixed/
+assets/vgg/vggsound_modify.csv

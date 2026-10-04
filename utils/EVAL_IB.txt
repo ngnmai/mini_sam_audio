@@ -1,0 +1,13 @@
+inputs = {ModalityType.AUDIO: audio_data, ModalityType.VISION: video_data}
+        embs = self.model(inputs)
+        audio_embs, video_embs = embs[ModalityType.AUDIO], embs[ModalityType.VISION]
+        audio_embs, video_embs = (
+            audio_embs / ((audio_embs**2).sum(dim=-1, keepdims=True) ** 0.5),
+            video_embs / ((video_embs**2).sum(dim=-1, keepdims=True) ** 0.5),
+        )
+        bsz = len(extracted_audio)
+        candidates = len(audio_embs) // bsz
+        scores = audio_embs.view(bsz, candidates, -1) @ video_embs.view(bsz, -1, 1)
+        return scores
+
+CHECK imagebind.py file for reference
