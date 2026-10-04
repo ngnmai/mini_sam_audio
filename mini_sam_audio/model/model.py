@@ -118,6 +118,20 @@ class MiniSAMAudio(BaseModel):
     def sample_rate(self):
         return self.audio_codec.sample_rate
 
+    def freeze_inference_backbones(
+        self,
+        *,
+        freeze_audio_codec: bool = True,
+        freeze_vision_encoder: bool = True,
+    ) -> None:
+        """Freeze backbone modules used as inference-only feature extractors."""
+        if freeze_audio_codec:
+            self.audio_codec.requires_grad_(False)
+            self.audio_codec.eval()
+        if freeze_vision_encoder:
+            self.vision_encoder.requires_grad_(False)
+            self.vision_encoder.eval()
+
     def align_inputs(
         self,
         noisy_audio,

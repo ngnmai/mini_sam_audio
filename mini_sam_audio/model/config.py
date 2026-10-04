@@ -190,6 +190,7 @@ class MiniSAMAudioConfig:
         num_anchors: int = 3,
         anchor_embedding_dim: int = 128,
         visual_ranker=None,
+        span_predictor: Optional[str] = None,
     ):
         self.in_channels = in_channels
         self.audio_codec = DACVAEConfig(**(audio_codec or {}))
@@ -201,7 +202,8 @@ class MiniSAMAudioConfig:
             None if visual_ranker is None else parse_ranker_config(visual_ranker)
         )
         self.text_ranker = None
-        self.span_predictor = None
+        # Opt-in only: pretrained span predictor must not load implicitly in scratch mode.
+        self.span_predictor = span_predictor
 
 
 # ----------------------------------------------------------------------

@@ -204,7 +204,7 @@ class Processor:
         return [v * m.eq(0) for v, m in zip(video, video_mask, strict=False)]
 
 
-class SAMAudioProcessor(Processor):
+class MiniSAMAudioProcessor(Processor):
     config_cls = MiniSAMAudioConfig
     revision = None
 
@@ -379,4 +379,4 @@ class SAMAudioJudgeProcessor(Processor):
         return batch
 
 
-__all__ = ["SAMAudioProcessor", "SAMAudioJudgeProcessor", "Batch"]
+__all__ = ["MiniSAMAudioProcessor", "SAMAudioJudgeProcessor", "Batch"]

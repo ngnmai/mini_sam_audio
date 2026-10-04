@@ -1,4 +1,4 @@
-"""Train Mini SAMAudio with a custom waveform/STFT/alignment/mixture-consistency loss.
+"""Train Mini SAM-Audio with a custom waveform/STFT/alignment/mixture-consistency loss.
 
 Uses PyTorch Lightning with the DDP strategy so the same entry point scales from a
 single GPU to multi-node jobs on CSC's Roihu (launched via ``srun``/``sbatch``,
@@ -38,7 +38,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mini_sam_audio import MiniSAMAudio, SAMAudioProcessor
+from mini_sam_audio import MiniSAMAudio
+from mini_sam_audio.compression.model_loading import bootstrap_model_and_processor
 
 from mini_sam_audio.model.loss import (
     MiniSAMAudioLoss,
@@ -49,7 +50,6 @@ from mini_sam_audio.model.loss import (
 from utils.dataset_soft_labels import CollatedBatch, SoftLabelDataset, make_collate_fn
 
 
-DEFAULT_CHECKPOINT_PATH = "facebook/sam-audio-small"
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_NUM_WORKERS = 4
 DEFAULT_NUM_EPOCHS = 1
@@ -66,16 +66,19 @@ DEFAULT_DEVICES = "auto"
 class MiniSAMAudioLightningModule(pl.LightningModule):
     def __init__(
         self,
-        checkpoint_path: str,
+        model: MiniSAMAudio,
         lr: float,
         w_wave_l1: float,
         w_stft_l1: float,
         w_align: float,
         w_mix_consistency: float,
+        freeze_backbones: bool,
     ):
         super().__init__()
-        self.save_hyperparameters()
-        self.model = MiniSAMAudio.from_pretrained(checkpoint_path)
+        self.save_hyperparameters(ignore=["model"])
+        self.model = model
+        if freeze_backbones:
+            self.model.freeze_inference_backbones()
         self.loss_fn = MiniSAMAudioLoss(
             w_wave_l1=w_wave_l1,
             w_stft_l1=w_stft_l1,
@@ -127,7 +130,28 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
         return losses["loss_total"]
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        forbidden_prefixes = ("audio_codec.", "vision_encoder.")
+        named_trainable_params = [
+            (name, param)
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+        ]
+        forbidden_trainable = [
+            name
+            for name, _ in named_trainable_params
+            if name.startswith(forbidden_prefixes)
+        ]
+        if forbidden_trainable:
+            joined = ", ".join(forbidden_trainable[:5])
+            raise RuntimeError(
+                f"Frozen-backbone parameters unexpectedly trainable: {joined}"
+            )
+
+        trainable_params = [param for _, param in named_trainable_params]
+        if not trainable_params:
+            raise RuntimeError("No trainable parameters found for optimizer setup")
+
+        return torch.optim.AdamW(trainable_params, lr=self.hparams.lr)
 
 
 def _parse_devices(value: str) -> int | str:
@@ -140,7 +164,7 @@ def _parse_devices(value: str) -> int | str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train Mini SAMAudio using a weighted waveform/STFT/alignment/mixture-consistency "
+            "Train Mini SAM-Audio using a weighted waveform/STFT/alignment/mixture-consistency "
             "loss against soft-label supervision, via PyTorch Lightning DDP."
         )
     )
@@ -151,10 +175,49 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing audio/, video/, mask/, and soft_labels/ subfolders.",
     )
     parser.add_argument(
+        "--init-mode",
+        type=str,
+        choices=["scratch", "checkpoint"],
+        default="scratch",
+        help=(
+            "Model/processor bootstrap mode. 'scratch' builds a fresh model/processor from local "
+            "JSON configs with no network access. 'checkpoint' loads weights from --checkpoint-path."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-path",
         type=str,
-        default=DEFAULT_CHECKPOINT_PATH,
-        help="SAM-Audio checkpoint path or Hugging Face repo id.",
+        default=None,
+        help="Local SAM-Audio checkpoint path. Required when --init-mode=checkpoint.",
+    )
+    parser.add_argument(
+        "--model-config",
+        type=Path,
+        default=None,
+        help=(
+            "Local JSON file with MiniSAMAudioConfig fields. Optional in scratch mode (falls back to "
+            "built-in defaults) and checkpoint mode (falls back to config.json next to --checkpoint-path)."
+        ),
+    )
+    parser.add_argument(
+        "--processor-config",
+        type=Path,
+        default=None,
+        help=(
+            "Local JSON file with 'audio_hop_length' and 'audio_sampling_rate' fields for "
+            "MiniSAMAudioProcessor. Optional; falls back to values derived from the model config."
+        ),
+    )
+    parser.add_argument(
+        "--unfreeze-inference-backbones",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep audio_codec/vision_encoder trainable in scratch mode instead of the default "
+            "frozen behavior. Checkpoint mode always freezes them regardless of this flag, since "
+            "both backbones are pretrained via their installed packages (dacvae, perception-models) "
+            "and only the rest of the model trains from scratch."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -194,7 +257,16 @@ def parse_args() -> argparse.Namespace:
         help="Number of nodes for multi-node DDP (set to match the Slurm job on Roihu).",
     )
     parser.add_argument("--log-every", type=int, default=DEFAULT_LOG_EVERY, help="Log loss values every N steps.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Build the model/processor, print a summary, and exit without starting training.",
+    )
+    args = parser.parse_args()
+    if args.init_mode == "checkpoint" and args.checkpoint_path is None:
+        parser.error("--checkpoint-path is required when --init-mode=checkpoint.")
+    return args
 
 
 def build_output_dir(data_root: Path, output_dir: Path | None) -> Path:
@@ -203,11 +275,45 @@ def build_output_dir(data_root: Path, output_dir: Path | None) -> Path:
     return data_root / "checkpoints"
 
 
+def print_model_summary(model: MiniSAMAudio, batch_size: int) -> None:
+    """Print the module tree and, when available, a torchinfo parameter/shape summary."""
+    print(model)
+    print()
+    try:
+        from torchinfo import summary
+    except ImportError:
+        print("[train_mini_sam_audio] torchinfo not installed; skipping tensor-shape summary.")
+        return
+
+    try:
+        print(summary(model, depth=4, verbose=0, row_settings=["var_names"]))
+    except Exception as exc:  # torchinfo requires a concrete input batch to trace shapes; skip gracefully.
+        print(f"[train_mini_sam_audio] torchinfo summary unavailable ({exc}); printed module tree only.")
+
+
 def main(args: argparse.Namespace) -> None:
     output_dir = build_output_dir(args.data_root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    processor = SAMAudioProcessor.from_pretrained(args.checkpoint_path)
+    model, processor, freeze_backbones = bootstrap_model_and_processor(
+        init_mode=args.init_mode,
+        checkpoint_path=args.checkpoint_path,
+        model_config_path=args.model_config,
+        processor_config_path=args.processor_config,
+        unfreeze_inference_backbones=args.unfreeze_inference_backbones,
+    )
+    print(
+        f"[train_mini_sam_audio] init_mode={args.init_mode} "
+        f"freeze_inference_backbones={freeze_backbones}"
+    )
+
+    if args.dry_run:
+        if freeze_backbones:
+            model.freeze_inference_backbones()
+        print_model_summary(model, batch_size=args.batch_size)
+        print("[train_mini_sam_audio] --dry-run set; exiting before dataset/trainer setup.")
+        return
+
     dataset = SoftLabelDataset(args.data_root)
     collate_fn = make_collate_fn(processor, processor.audio_sampling_rate)
     dataloader = DataLoader(
@@ -219,12 +325,13 @@ def main(args: argparse.Namespace) -> None:
     )
 
     module = MiniSAMAudioLightningModule(
-        checkpoint_path=args.checkpoint_path,
+        model=model,
         lr=args.lr,
         w_wave_l1=args.w_wave_l1,
         w_stft_l1=args.w_stft_l1,
         w_align=args.w_align,
         w_mix_consistency=args.w_mix_consistency,
+        freeze_backbones=freeze_backbones,
     )
 
     trainer = pl.Trainer(
