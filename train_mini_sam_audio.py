@@ -1,4 +1,4 @@
-"""Train SAMAudio with a custom waveform/STFT/alignment/mixture-consistency loss.
+"""Train Mini SAMAudio with a custom waveform/STFT/alignment/mixture-consistency loss.
 
 Uses PyTorch Lightning with the DDP strategy so the same entry point scales from a
 single GPU to multi-node jobs on CSC's Roihu (launched via ``srun``/``sbatch``,
@@ -14,10 +14,10 @@ directory layout as ``utils/generate_soft_labels.py``::
     data_root/residual_labels/<stem>.wav  (optional)
 
 Example (single node):
-    python utils/train_mini_sam_audio.py --data-root /path/to/data_root --devices 4
+    python train_mini_sam_audio.py --data-root /path/to/data_root --devices 4
 
 Example (Roihu, multi-node, launched per-task via srun):
-    srun python utils/train_mini_sam_audio.py --data-root /path/to/data_root \\
+    srun python train_mini_sam_audio.py --data-root /path/to/data_root \\
         --devices 4 --num-nodes 2
 """
 
@@ -33,15 +33,12 @@ from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SAM_AUDIO_ROOT = PROJECT_ROOT / "submodule" / "sam-audio"
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-if SAM_AUDIO_ROOT.exists():
-    sys.path.insert(0, str(SAM_AUDIO_ROOT))
 
-from sam_audio import SAMAudio, SAMAudioProcessor
+from mini_sam_audio import MiniSAMAudio, SAMAudioProcessor
 
 from mini_sam_audio.model.loss import (
     MiniSAMAudioLoss,
@@ -49,7 +46,7 @@ from mini_sam_audio.model.loss import (
     SeparationTargets,
 )
 
-from dataset_soft_labels import CollatedBatch, SoftLabelDataset, make_collate_fn
+from utils.dataset_soft_labels import CollatedBatch, SoftLabelDataset, make_collate_fn
 
 
 DEFAULT_CHECKPOINT_PATH = "facebook/sam-audio-small"
@@ -78,7 +75,7 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = SAMAudio.from_pretrained(checkpoint_path)
+        self.model = MiniSAMAudio.from_pretrained(checkpoint_path)
         self.loss_fn = MiniSAMAudioLoss(
             w_wave_l1=w_wave_l1,
             w_stft_l1=w_stft_l1,
@@ -143,7 +140,7 @@ def _parse_devices(value: str) -> int | str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train SAMAudio using a weighted waveform/STFT/alignment/mixture-consistency "
+            "Train Mini SAMAudio using a weighted waveform/STFT/alignment/mixture-consistency "
             "loss against soft-label supervision, via PyTorch Lightning DDP."
         )
     )

@@ -40,8 +40,8 @@ def load_student_model(
     **config_kwargs: Any,
 ):
     """Create the mini SAM-Audio student model and optionally load weights."""
-    from mini_sam_audio.model.config import SAMAudioConfig as StudentConfig
-    from mini_sam_audio.model.model import SAMAudio as StudentSAMAudio
+    from mini_sam_audio.model.config import MiniSAMAudioConfig as StudentConfig
+    from mini_sam_audio.model.model import MiniSAMAudio as StudentSAMAudio
 
     student_config = config or StudentConfig(**config_kwargs)
     model = StudentSAMAudio(student_config)

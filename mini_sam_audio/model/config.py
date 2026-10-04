@@ -121,20 +121,12 @@ class TransformerConfig:
 class RankerConfig:
     kind: str
 
-'''
+
 class ImageBindRankerConfig(RankerConfig):
     kind: str = "imagebind"
 
     def __init__(self, checkpoint: Optional[str] = None):
         self.checkpoint = checkpoint
-
-
-class ClapRankerConfig(RankerConfig):
-    kind: str = "clap"
-
-    def __init__(self, checkpoint: Optional[str] = None):
-        self.checkpoint = checkpoint
-'''
 
 class JudgeRankerConfig(RankerConfig):
     kind: str = "judge"
@@ -169,8 +161,6 @@ def parse_ranker_config(config_dict: dict):
     match kind:
         case ImageBindRankerConfig.kind:
             return ImageBindRankerConfig(**config_dict)
-        case ClapRankerConfig.kind:
-            return ClapRankerConfig(**config_dict)
         case JudgeRankerConfig.kind:
             return JudgeRankerConfig(**config_dict)
         case SoundActivityRankerConfig.kind:
@@ -182,9 +172,15 @@ def parse_ranker_config(config_dict: dict):
                     for k, (v, w) in config_dict["rankers"].items()
                 }
             )
+        case "clap":
+            raise ValueError(
+                "CLAP ranker is disabled for mini_sam_audio. Use imagebind/judge/sound_activity instead."
+            )
+        case _:
+            raise ValueError(f"Unknown ranker kind: {kind}")
 
 
-class SAMAudioConfig:
+class MiniSAMAudioConfig:
     def __init__(
         self,
         in_channels: int = 768,

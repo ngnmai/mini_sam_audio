@@ -12,11 +12,11 @@ from torchdiffeq import odeint
 from .align import AlignModalities
 from .base import BaseModel
 from .codec import DACVAE
-from .config import SAMAudioConfig
+from .config import MiniSAMAudioConfig
 from .transformer import DiT
 from .vision_encoder import PerceptionEncoder
-from sam_audio.processor import Batch
-from sam_audio.ranking import create_ranker
+from mini_sam_audio.processor import Batch
+from mini_sam_audio.ranking import create_ranker
 
 DFLT_ODE_OPT = {"method": "midpoint", "options": {"step_size": 2 / 32}}
 
@@ -83,11 +83,11 @@ class SeparationTrainingOutputs:
     wav_sizes: Optional[torch.Tensor]  # [B]
 
 
-class SAMAudio(BaseModel):
-    config_cls = SAMAudioConfig
+class MiniSAMAudio(BaseModel):
+    config_cls = MiniSAMAudioConfig
     revision = None
 
-    def __init__(self, cfg: SAMAudioConfig):
+    def __init__(self, cfg: MiniSAMAudioConfig):
         super().__init__()
         self.audio_codec = DACVAE(cfg.audio_codec)
         self.vision_encoder = PerceptionEncoder(cfg.vision_encoder)
@@ -416,4 +416,4 @@ class SAMAudio(BaseModel):
                 )
 
 
-__all__ = ["SAMAudio"]
+__all__ = ["MiniSAMAudio"]
