@@ -6,6 +6,39 @@ from typing import Optional
 import torch
 
 
+def compute_si_sdr_db(
+    pred_wav: torch.Tensor,
+    target_wav: torch.Tensor,
+    lengths: Optional[torch.Tensor] = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Compute scale-invariant signal-to-distortion ratio in dB for each sample."""
+    if pred_wav.shape != target_wav.shape:
+        raise ValueError(
+            f"pred_wav and target_wav must match in shape; got {pred_wav.shape} and {target_wav.shape}."
+        )
+
+    if lengths is not None:
+        max_len = pred_wav.size(-1)
+        idx = torch.arange(max_len, device=pred_wav.device).unsqueeze(0)
+        mask = idx < lengths.unsqueeze(1)
+        pred_wav = pred_wav * mask.to(pred_wav.dtype)
+        target_wav = target_wav * mask.to(target_wav.dtype)
+
+    pred_centered = pred_wav - pred_wav.mean(dim=-1, keepdim=True)
+    target_centered = target_wav - target_wav.mean(dim=-1, keepdim=True)
+
+    alpha = (pred_centered * target_centered).sum(-1) / (
+        target_centered.pow(2).sum(-1) + eps
+    )
+    projection = alpha.unsqueeze(-1) * target_centered
+    noise = pred_centered - projection
+
+    signal_energy = projection.pow(2).sum(-1) + eps
+    noise_energy = noise.pow(2).sum(-1) + eps
+    return 10 * torch.log10(signal_energy) - 10 * torch.log10(noise_energy)
+
+
 @dataclass
 class SeparationPredictions:
     pred_target_wav: torch.Tensor  # [B, T_wav]
@@ -172,4 +205,9 @@ class MiniSAMAudioLoss(torch.nn.Module):
         }
 
 
-__all__ = ["SeparationPredictions", "SeparationTargets", "MiniSAMAudioLoss"]
+__all__ = [
+    "SeparationPredictions",
+    "SeparationTargets",
+    "MiniSAMAudioLoss",
+    "compute_si_sdr_db",
+]

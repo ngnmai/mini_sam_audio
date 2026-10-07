@@ -24,11 +24,13 @@ Example (Roihu, multi-node, launched per-task via srun):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import pytorch_lightning as pl
 import torch
+from pytorch_lightning.loggers import MLFlowLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
@@ -45,6 +47,7 @@ from mini_sam_audio.model.loss import (
     MiniSAMAudioLoss,
     SeparationPredictions,
     SeparationTargets,
+    compute_si_sdr_db,
 )
 
 from utils.dataset_soft_labels import CollatedBatch, SoftLabelDataset, make_collate_fn
@@ -61,6 +64,7 @@ DEFAULT_W_MIX_CONSISTENCY = 0.5
 DEFAULT_LOG_EVERY = 10
 DEFAULT_NUM_NODES = 1
 DEFAULT_DEVICES = "auto"
+DEFAULT_MLFLOW_EXPERIMENT_NAME = "mini_sam_audio"
 
 
 class MiniSAMAudioLightningModule(pl.LightningModule):
@@ -95,10 +99,9 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
         batch.residual_wav = batch.residual_wav.to(device)
         return batch
 
-    def training_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
+    def _shared_step(self, collated: CollatedBatch, stage: str) -> torch.Tensor:
         outputs = self.model.separate_for_training(collated.batch)
 
-        # preds
         preds = SeparationPredictions(
             pred_target_wav=outputs.pred_target_wav,
             pred_residual_wav=outputs.pred_residual_wav,
@@ -108,7 +111,6 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
             wav_sizes=outputs.wav_sizes,
         )
 
-        # ground truth
         targets = SeparationTargets(
             mixture_wav=collated.batch.audios.squeeze(1),
             target_wav=collated.target_wav,
@@ -117,17 +119,40 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
 
         losses = self.loss_fn(preds, targets)
         batch_size = collated.batch.audios.size(0)
+        si_sdr_db = compute_si_sdr_db(
+            outputs.pred_target_wav,
+            collated.target_wav,
+            outputs.wav_sizes,
+        ).mean()
+
         for name, value in losses.items():
+            metric_name = f"{stage}_{name}"
             self.log(
-                name,
+                metric_name,
                 value,
                 on_step=True,
                 on_epoch=True,
-                prog_bar=(name == "loss_total"),
+                prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
                 batch_size=batch_size,
                 sync_dist=True,
             )
+
+        self.log(
+            f"{stage}_si_sdr_db",
+            si_sdr_db,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
         return losses["loss_total"]
+
+    def training_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(collated, stage="train")
+
+    def validation_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(collated, stage="val")
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         forbidden_prefixes = ("audio_codec.", "vision_encoder.")
@@ -169,10 +194,16 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "--data-root",
+        "--train-data-root",
         type=Path,
         required=True,
-        help="Directory containing audio/, video/, mask/, and soft_labels/ subfolders.",
+        help="Directory containing audio/, video/, mask/, and soft_labels/ subfolders for training.",
+    )
+    parser.add_argument(
+        "--val-data-root",
+        type=Path,
+        required=True,
+        help="Directory with the same layout as --train-data-root, used for validation.",
     )
     parser.add_argument(
         "--init-mode",
@@ -258,6 +289,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-every", type=int, default=DEFAULT_LOG_EVERY, help="Log loss values every N steps.")
     parser.add_argument(
+        "--mlflow-tracking-uri",
+        type=str,
+        default=None,
+        help="MLflow tracking URI (directory or sqlite:/// path). Defaults to '<output-dir>/mlruns' when unset.",
+    )
+    parser.add_argument(
+        "--mlflow-experiment-name",
+        type=str,
+        default=DEFAULT_MLFLOW_EXPERIMENT_NAME,
+        help="MLflow experiment name.",
+    )
+    parser.add_argument(
+        "--mlflow-run-name",
+        type=str,
+        default=None,
+        help="MLflow run name. Defaults to the SLURM_JOB_ID environment variable when unset.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -269,10 +318,10 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_output_dir(data_root: Path, output_dir: Path | None) -> Path:
+def build_output_dir(train_data_root: Path, output_dir: Path | None) -> Path:
     if output_dir is not None:
         return output_dir
-    return data_root / "checkpoints"
+    return train_data_root / "checkpoints"
 
 
 def print_model_summary(model: MiniSAMAudio, batch_size: int) -> None:
@@ -292,7 +341,7 @@ def print_model_summary(model: MiniSAMAudio, batch_size: int) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
-    output_dir = build_output_dir(args.data_root, args.output_dir)
+    output_dir = build_output_dir(args.train_data_root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model, processor, freeze_backbones = bootstrap_model_and_processor(
@@ -314,12 +363,21 @@ def main(args: argparse.Namespace) -> None:
         print("[train_mini_sam_audio] --dry-run set; exiting before dataset/trainer setup.")
         return
 
-    dataset = SoftLabelDataset(args.data_root)
+    train_dataset = SoftLabelDataset(args.train_data_root)
+    val_dataset = SoftLabelDataset(args.val_data_root)
+
     collate_fn = make_collate_fn(processor, processor.audio_sampling_rate)
-    dataloader = DataLoader(
-        dataset,
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=args.num_workers,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
         collate_fn=collate_fn,
         num_workers=args.num_workers,
     )
@@ -334,17 +392,29 @@ def main(args: argparse.Namespace) -> None:
         freeze_backbones=freeze_backbones,
     )
 
+    mlflow_tracking_uri = args.mlflow_tracking_uri or f"file:{output_dir / 'mlruns'}"
+    mlflow_run_name = args.mlflow_run_name or os.environ.get("SLURM_JOB_ID")
+    mlflow_logger = MLFlowLogger(
+        experiment_name=args.mlflow_experiment_name,
+        tracking_uri=mlflow_tracking_uri,
+        run_name=mlflow_run_name,
+    )
+    mlflow_logger.log_hyperparams(
+        {key: (str(value) if value is not None else "None") for key, value in vars(args).items()}
+    )
+
     trainer = pl.Trainer(
         default_root_dir=str(output_dir),
         max_epochs=args.num_epochs,
         accelerator=args.accelerator,
         devices=args.devices,
         num_nodes=args.num_nodes,
+        logger=mlflow_logger,
         # find_unused_parameters: the frozen vision encoder runs under no_grad and never gets gradients.
         strategy=DDPStrategy(find_unused_parameters=True),
         log_every_n_steps=args.log_every,
     )
-    trainer.fit(module, train_dataloaders=dataloader)
+    trainer.fit(module, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
     if trainer.is_global_zero:
         checkpoint_path = output_dir / "mini_sam_audio_final.pt"
