@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
-from core.audio_visual_encoder import PEAudioFrame, PEAudioFrameTransform
 from torchdiffeq import odeint
 
 from .align import AlignModalities
@@ -104,14 +103,6 @@ class MiniSAMAudio(BaseModel):
         )
         self.timestep_emb = SinusoidalEmbedding(cfg.transformer.dim)
         self.visual_ranker = create_ranker(cfg.visual_ranker)
-        self.text_ranker = None
-        if cfg.span_predictor is not None:
-            self.span_predictor = PEAudioFrame.from_config(
-                cfg.span_predictor, pretrained=True
-            )
-            self.span_predictor_transform = PEAudioFrameTransform.from_config(
-                cfg.span_predictor
-            )
         self.cached_video_features_128: Optional[torch.Tensor] = None
 
     @property
@@ -250,22 +241,6 @@ class MiniSAMAudio(BaseModel):
             ),
         }
 
-    def predict_spans(
-        self, batch: Batch, audio_features: torch.Tensor, audio_pad_mask: torch.Tensor
-    ) -> Batch:
-        input = self.span_predictor_transform(text=batch.descriptions).to(
-            audio_features.device
-        )
-        output = self.span_predictor(
-            input_features=audio_features[:, :, :128],
-            padding_mask=audio_pad_mask,
-            return_spans=True,
-            **input,
-        )
-        anchors = [[["+"] + anchor for anchor in anchors] for anchors in output.spans]
-        batch.process_anchors(anchors)
-        return batch
-
     @torch.inference_mode()
     def separate(
         self,
@@ -273,21 +248,9 @@ class MiniSAMAudio(BaseModel):
         noise: Optional[torch.Tensor] = None,
         ode_opt: Dict[str, Any] = DFLT_ODE_OPT,
         reranking_candidates: int = 1,
-        predict_spans: bool = False,
     ) -> SeparationResult:
         # Encode audio
         forward_args = self._get_forward_args(batch, candidates=reranking_candidates)
-
-        if predict_spans and hasattr(self, "span_predictor") and batch.anchors is None:
-            batch = self.predict_spans(
-                batch=batch,
-                audio_features=self._unrepeat_from_reranking(
-                    forward_args["audio_features"], reranking_candidates
-                ),
-                audio_pad_mask=self._unrepeat_from_reranking(
-                    forward_args["audio_pad_mask"], reranking_candidates
-                ),
-            )
 
         audio_features = forward_args["audio_features"]
         B, T, C = audio_features.shape
@@ -333,18 +296,6 @@ class MiniSAMAudio(BaseModel):
             scores = self.visual_ranker(
                 extracted_audio=target_wavs,
                 videos=batch.masked_video,
-                sample_rate=self.audio_codec.sample_rate,
-            )
-            idxs = scores.argmax(dim=1)
-        elif reranking_candidates > 1 and self.text_ranker is not None:
-            input_audio = [
-                audio[:, :size].expand(reranking_candidates, -1)
-                for audio, size in zip(batch.audios, sizes, strict=False)
-            ]
-            scores = self.text_ranker(
-                extracted_audio=target_wavs,
-                input_audio=input_audio,
-                descriptions=batch.descriptions,
                 sample_rate=self.audio_codec.sample_rate,
             )
             idxs = scores.argmax(dim=1)
@@ -420,9 +371,7 @@ class MiniSAMAudio(BaseModel):
                 state_dict, strict=False
             )
             # We load this directly from HF, not in checkpoint
-            skip_regex = re.compile(
-                "(^text_encoder|^visual_ranker|^text_ranker|^span_predictor)"
-            )
+            skip_regex = re.compile("(^visual_ranker)")
             missing_keys = [x for x in missing_keys if not re.search(skip_regex, x)]
             if len(missing_keys) > 0 or len(unexpected_keys) > 0:
                 raise RuntimeError(
