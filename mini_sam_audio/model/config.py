@@ -69,8 +69,8 @@ class PerceptionEncoderConfig(VisionEncoderConfig):
 class TransformerConfig:
     def __init__(
         self,
-        dim: int = 2048,
-        n_heads: int = 16,
+        dim: int = 768,
+        n_heads: int = 6,
         n_layers: int = 6,
         dropout: float = 0.1,
         norm_eps: float = 1.0e-05,
@@ -86,7 +86,7 @@ class TransformerConfig:
         timestep_non_linearity: str = "swiglu",
         t_block_non_linearity: str = "silu",
         t_block_bias: bool = True,
-        context_dim: int = 2048,
+        context_dim: int = 768,
         context_non_linearity: str = "swiglu",
         context_embedder_dropout: float = 0.0,
         context_norm: bool = False,

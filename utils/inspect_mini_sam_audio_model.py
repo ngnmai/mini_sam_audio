@@ -233,6 +233,7 @@ def _group_parameter_stats(
     grouped: dict[str, list[tuple[str, torch.nn.Parameter]]] = {
         "audio_codec": [],
         "vision_encoder": [],
+        "transformer": [],
         "other": [],
     }
 
@@ -241,6 +242,8 @@ def _group_parameter_stats(
             grouped["audio_codec"].append((name, param))
         elif name.startswith("vision_encoder."):
             grouped["vision_encoder"].append((name, param))
+        elif name.startswith("transformer."):
+            grouped["transformer"].append((name, param))
         else:
             grouped["other"].append((name, param))
 
@@ -260,6 +263,8 @@ def _print_grouped_parameter_overview(grouped_stats: dict[str, ParamStats], excl
     _print_stats_block("audio_codec", grouped_stats["audio_codec"])
     print()
     _print_stats_block("vision_encoder", grouped_stats["vision_encoder"])
+    print()
+    _print_stats_block("transformer", grouped_stats["transformer"])
     print()
     _print_stats_block("other", grouped_stats["other"])
     print()
