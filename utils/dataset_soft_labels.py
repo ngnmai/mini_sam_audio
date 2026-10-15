@@ -6,13 +6,14 @@ Expects a ``data_root`` directory laid out the same way as
     data_root/audio/<stem>.wav
     data_root/video/<stem>.mp4
     data_root/mask/<stem>.mp4
-    data_root/soft_labels/<stem>.wav
-    data_root/residual_labels/<stem>.wav  (optional, per-stem)
+    data_root/soft_labels/<stem>_target.wav
+    data_root/soft_labels/<stem>_residual.wav  (optional, per-stem)
 
-``soft_labels/`` is mandatory here (it is the supervision signal), unlike
-``utils/inference_sam_audio.py`` which only requires audio/video/mask.
-``residual_labels/`` is optional: when a per-stem residual file is absent the
-residual target is derived as ``mixture - soft_label``.
+``soft_labels/<stem>_target.wav`` is mandatory here (it is the supervision
+signal), unlike ``utils/inference_sam_audio.py`` which only requires
+audio/video/mask. ``soft_labels/<stem>_residual.wav`` is optional: when a
+per-stem residual file is absent the residual target is derived as
+``mixture - soft_label``.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 AUDIO_EXTENSIONS = (".wav",)
 VIDEO_EXTENSIONS = (".mp4",)
+TARGET_SUFFIX = "_target"
+RESIDUAL_SUFFIX = "_residual"
 
 
 @dataclass(frozen=True)
@@ -64,14 +67,20 @@ def _collect_files(folder: Path, extensions: tuple[str, ...]) -> dict[str, Path]
     return files
 
 
-def _collect_files_optional(folder: Path, extensions: tuple[str, ...]) -> dict[str, Path]:
+def _collect_suffixed_files(
+    folder: Path, suffix: str, extensions: tuple[str, ...]
+) -> dict[str, Path]:
+    """Collects files in ``folder`` named ``<stem>{suffix}<ext>``, keyed by ``<stem>``."""
     if not folder.exists():
         return {}
-    return {
-        path.stem: path
-        for path in sorted(folder.iterdir())
-        if path.is_file() and path.suffix.lower() in extensions
-    }
+    files: dict[str, Path] = {}
+    for path in sorted(folder.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        if not path.stem.endswith(suffix):
+            continue
+        files[path.stem[: -len(suffix)]] = path
+    return files
 
 
 class SoftLabelDataset(Dataset):
@@ -83,7 +92,14 @@ class SoftLabelDataset(Dataset):
         audio_files = _collect_files(self.data_root / "audio", AUDIO_EXTENSIONS)
         video_files = _collect_files(self.data_root / "video", VIDEO_EXTENSIONS)
         mask_files = _collect_files(self.data_root / "mask", VIDEO_EXTENSIONS)
-        soft_label_files = _collect_files(self.data_root / "soft_labels", AUDIO_EXTENSIONS)
+
+        soft_labels_dir = self.data_root / "soft_labels"
+        soft_label_files = _collect_suffixed_files(soft_labels_dir, TARGET_SUFFIX, AUDIO_EXTENSIONS)
+        if not soft_label_files:
+            raise ValueError(
+                f"No '*{TARGET_SUFFIX}.wav' files found in {soft_labels_dir}"
+            )
+        residual_files = _collect_suffixed_files(soft_labels_dir, RESIDUAL_SUFFIX, AUDIO_EXTENSIONS)
 
         common_stems = sorted(
             set(audio_files) & set(video_files) & set(mask_files) & set(soft_label_files)
@@ -119,8 +135,6 @@ class SoftLabelDataset(Dataset):
                     f"  Missing soft_labels for {len(missing_soft_label)} stem(s): "
                     f"{', '.join(missing_soft_label[:10])}"
                 )
-
-        residual_files = _collect_files_optional(self.data_root / "residual_labels", AUDIO_EXTENSIONS)
 
         self.samples = [
             SoftLabelSample(
