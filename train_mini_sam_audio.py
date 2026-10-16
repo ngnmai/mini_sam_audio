@@ -4,8 +4,8 @@ Uses PyTorch Lightning with the DDP strategy so the same entry point scales from
 single GPU to multi-node jobs on CSC's Roihu (launched via ``srun``/``sbatch``,
 which Lightning's SLURM environment auto-detects).
 
-Reads soft-label supervised training data from ``--data-root`` using the same
-directory layout as ``utils/generate_soft_labels.py``::
+Reads soft-label supervised training data from ``--train-data-root``/``--val-data-root`` using
+the same directory layout as ``utils/generate_soft_labels.py``::
 
     data_root/audio/<stem>.wav
     data_root/video/<stem>.mp4
@@ -14,10 +14,11 @@ directory layout as ``utils/generate_soft_labels.py``::
     data_root/residual_labels/<stem>.wav  (optional)
 
 Example (single node):
-    python train_mini_sam_audio.py --data-root /path/to/data_root --devices 4
+    python train_mini_sam_audio.py --train-data-root /path/to/train --val-data-root /path/to/val \\
+        --devices 4
 
 Example (Roihu, multi-node, launched per-task via srun):
-    srun python train_mini_sam_audio.py --data-root /path/to/data_root \\
+    srun python train_mini_sam_audio.py --train-data-root /path/to/train --val-data-root /path/to/val \\
         --devices 4 --num-nodes 2
 """
 
@@ -28,10 +29,9 @@ import os
 import sys
 from pathlib import Path
 
+import lightning as L
 import mlflow
-import pytorch_lightning as pl
 import torch
-from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
 
@@ -67,7 +67,7 @@ DEFAULT_DEVICES = "auto"
 DEFAULT_MLFLOW_EXPERIMENT_NAME = "mini_sam_audio"
 
 
-class MiniSAMAudioLightningModule(pl.LightningModule):
+class MiniSAMAudioLightningModule(L.LightningModule):
     def __init__(
         self,
         model: MiniSAMAudio,
@@ -99,42 +99,52 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
         batch.residual_wav = batch.residual_wav.to(device)
         return batch
 
-    def _shared_step(self, collated: CollatedBatch, stage: str) -> torch.Tensor:
-        outputs = self.model.separate_for_training(collated.batch)
+    def _shared_step(self, collated: CollatedBatch, stage: str, batch_idx: int) -> torch.Tensor:
+        try:
+            outputs = self.model.separate_for_training(collated.batch)
 
-        preds = SeparationPredictions(
-            pred_target_wav=outputs.pred_target_wav,
-            pred_residual_wav=outputs.pred_residual_wav,
-            pred_target_latent_128=outputs.pred_target_latent_128,
-            video_embed_128=outputs.video_embed_128,
-            audio_pad_mask=outputs.audio_pad_mask,
-            wav_sizes=outputs.wav_sizes,
-        )
-
-        targets = SeparationTargets(
-            mixture_wav=collated.batch.audios.squeeze(1),
-            target_wav=collated.target_wav,
-            residual_wav=collated.residual_wav,
-        )
-
-        losses = self.loss_fn(preds, targets)
-        batch_size = collated.batch.audios.size(0)
-        si_sdr_db = compute_si_sdr_db(
-            outputs.pred_target_wav,
-            collated.target_wav,
-            outputs.wav_sizes,
-        ).mean()
-
-        for name, value in losses.items():
-            metric_name = f"{stage}_{name}"
-            self._log_metric(
-                metric_name,
-                value,
-                batch_size=batch_size,
-                prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
+            preds = SeparationPredictions(
+                pred_target_wav=outputs.pred_target_wav,
+                pred_residual_wav=outputs.pred_residual_wav,
+                pred_target_latent_128=outputs.pred_target_latent_128,
+                video_embed_128=outputs.video_embed_128,
+                audio_pad_mask=outputs.audio_pad_mask,
+                wav_sizes=outputs.wav_sizes,
             )
 
-        self._log_metric(f"{stage}_si_sdr_db", si_sdr_db, batch_size=batch_size, prog_bar=True)
+            targets = SeparationTargets(
+                mixture_wav=collated.batch.audios.squeeze(1),
+                target_wav=collated.target_wav,
+                residual_wav=collated.residual_wav,
+            )
+
+            losses = self.loss_fn(preds, targets)
+            batch_size = collated.batch.audios.size(0)
+            si_sdr_db = compute_si_sdr_db(
+                outputs.pred_target_wav,
+                collated.target_wav,
+                outputs.wav_sizes,
+            ).mean()
+
+            for name, value in losses.items():
+                metric_name = f"{stage}_{name}"
+                self._log_metric(
+                    metric_name,
+                    value,
+                    batch_size=batch_size,
+                    prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
+                )
+
+            self._log_metric(f"{stage}_si_sdr_db", si_sdr_db, batch_size=batch_size, prog_bar=True)
+        except Exception as exc:
+            print(
+                f"[train_mini_sam_audio] _shared_step failed: stage={stage} batch_idx={batch_idx} "
+                f"global_step={self.global_step} global_rank={self.trainer.global_rank} "
+                f"audios.shape={collated.batch.audios.shape} target_wav.shape={collated.target_wav.shape} "
+                f"error={exc}",
+                flush=True,
+            )
+            raise
         return losses["loss_total"]
 
     def _log_metric(self, name: str, value: torch.Tensor, batch_size: int, prog_bar: bool) -> None:
@@ -147,15 +157,12 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
             batch_size=batch_size,
             sync_dist=True,
         )
-        # Only rank 0 writes to the mlflow run to avoid duplicate/racing metric writes under DDP.
-        if self.trainer.is_global_zero:
-            mlflow.log_metric(name, value.item(), step=self.trainer.global_step)
 
     def training_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(collated, stage="train")
+        return self._shared_step(collated, stage="train", batch_idx=batch_idx)
 
     def validation_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(collated, stage="val")
+        return self._shared_step(collated, stage="val", batch_idx=batch_idx)
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         forbidden_prefixes = ("audio_codec.", "vision_encoder.")
@@ -292,10 +299,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-every", type=int, default=DEFAULT_LOG_EVERY, help="Log loss values every N steps.")
     parser.add_argument(
+        "--detect-anomaly",
+        action="store_true",
+        default=False,
+        help="Enable PyTorch autograd anomaly detection for debugging NaN/Inf gradients.",
+    )
+    parser.add_argument(
+        "--num-sanity-val-steps",
+        type=int,
+        default=2,
+        help="Number of validation sanity-check batches to run before training starts.",
+    )
+    parser.add_argument(
         "--mlflow-tracking-uri",
         type=str,
         default=None,
-        help="MLflow tracking URI (directory or sqlite:/// path). Defaults to '<output-dir>/mlruns' when unset.",
+        help=(
+            "Optional MLflow tracking URI override (directory or sqlite:/// path). When unset, uses "
+            "whatever tracking URI is already configured in the environment (e.g. MLFLOW_TRACKING_URI)."
+        ),
     )
     parser.add_argument(
         "--mlflow-experiment-name",
@@ -345,6 +367,15 @@ def print_model_summary(model: MiniSAMAudio, batch_size: int) -> None:
 
 def main(args: argparse.Namespace) -> None:
     torch.set_float32_matmul_precision("high")
+    print(
+        f"[train_mini_sam_audio] RANK={os.environ.get('RANK', 'unset')} "
+        f"LOCAL_RANK={os.environ.get('LOCAL_RANK', 'unset')} "
+        f"WORLD_SIZE={os.environ.get('WORLD_SIZE', 'unset')} "
+        f"SLURM_JOB_ID={os.environ.get('SLURM_JOB_ID', 'unset')} "
+        f"SLURM_NODELIST={os.environ.get('SLURM_NODELIST', 'unset')}",
+        flush=True,
+    )
+    mlflow.autolog()
 
     output_dir = build_output_dir(args.train_data_root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -410,17 +441,18 @@ def main(args: argparse.Namespace) -> None:
         freeze_backbones=freeze_backbones,
     )
 
-    mlflow_tracking_uri = args.mlflow_tracking_uri or f"file:{output_dir / 'mlruns'}"
     mlflow_run_name = args.mlflow_run_name or os.environ.get("SLURM_JOB_ID")
     print(
         f"[train_mini_sam_audio] Configuring MLflow tracking "
-        f"(tracking_uri={mlflow_tracking_uri}, run_name={mlflow_run_name})...",
+        f"(tracking_uri={args.mlflow_tracking_uri or '<environment-configured>'}, "
+        f"run_name={mlflow_run_name})...",
         flush=True,
     )
-    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    if args.mlflow_tracking_uri:
+        mlflow.set_tracking_uri(args.mlflow_tracking_uri)
     mlflow.set_experiment(args.mlflow_experiment_name)
 
-    trainer = pl.Trainer(
+    trainer = L.Trainer(
         default_root_dir=str(output_dir),
         max_epochs=args.num_epochs,
         accelerator=args.accelerator,
@@ -428,9 +460,10 @@ def main(args: argparse.Namespace) -> None:
         num_nodes=args.num_nodes,
         precision="bf16-mixed",
         logger=False,
-        # find_unused_parameters: the frozen vision encoder runs under no_grad and never gets gradients.
-        strategy=DDPStrategy(find_unused_parameters=True),
+        strategy="ddp",
         log_every_n_steps=args.log_every,
+        detect_anomaly=args.detect_anomaly,
+        num_sanity_val_steps=args.num_sanity_val_steps,
     )
 
     if trainer.is_global_zero:
