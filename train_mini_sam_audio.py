@@ -341,9 +341,12 @@ def print_model_summary(model: MiniSAMAudio, batch_size: int) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    torch.set_float32_matmul_precision("high")
+
     output_dir = build_output_dir(args.train_data_root, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print("[train_mini_sam_audio] Bootstrapping model and processor...", flush=True)
     model, processor, freeze_backbones = bootstrap_model_and_processor(
         init_mode=args.init_mode,
         checkpoint_path=args.checkpoint_path,
@@ -353,7 +356,8 @@ def main(args: argparse.Namespace) -> None:
     )
     print(
         f"[train_mini_sam_audio] init_mode={args.init_mode} "
-        f"freeze_inference_backbones={freeze_backbones}"
+        f"freeze_inference_backbones={freeze_backbones}",
+        flush=True,
     )
 
     if args.dry_run:
@@ -363,8 +367,13 @@ def main(args: argparse.Namespace) -> None:
         print("[train_mini_sam_audio] --dry-run set; exiting before dataset/trainer setup.")
         return
 
+    print(f"[train_mini_sam_audio] Loading train dataset from {args.train_data_root}...", flush=True)
     train_dataset = SoftLabelDataset(args.train_data_root)
+    print(f"[train_mini_sam_audio] Train dataset loaded: {len(train_dataset)} samples", flush=True)
+
+    print(f"[train_mini_sam_audio] Loading val dataset from {args.val_data_root}...", flush=True)
     val_dataset = SoftLabelDataset(args.val_data_root)
+    print(f"[train_mini_sam_audio] Val dataset loaded: {len(val_dataset)} samples", flush=True)
 
     collate_fn = make_collate_fn(processor, processor.audio_sampling_rate)
     train_dataloader = DataLoader(
@@ -381,7 +390,13 @@ def main(args: argparse.Namespace) -> None:
         collate_fn=collate_fn,
         num_workers=args.num_workers,
     )
+    print(
+        f"[train_mini_sam_audio] Dataloaders ready: "
+        f"{len(train_dataloader)} train batches, {len(val_dataloader)} val batches",
+        flush=True,
+    )
 
+    print("[train_mini_sam_audio] Building Lightning module...", flush=True)
     module = MiniSAMAudioLightningModule(
         model=model,
         lr=args.lr,
@@ -394,6 +409,11 @@ def main(args: argparse.Namespace) -> None:
 
     mlflow_tracking_uri = args.mlflow_tracking_uri or f"file:{output_dir / 'mlruns'}"
     mlflow_run_name = args.mlflow_run_name or os.environ.get("SLURM_JOB_ID")
+    print(
+        f"[train_mini_sam_audio] Setting up MLflow logger "
+        f"(tracking_uri={mlflow_tracking_uri}, run_name={mlflow_run_name})...",
+        flush=True,
+    )
     mlflow_logger = MLFlowLogger(
         experiment_name=args.mlflow_experiment_name,
         tracking_uri=mlflow_tracking_uri,
@@ -409,11 +429,13 @@ def main(args: argparse.Namespace) -> None:
         accelerator=args.accelerator,
         devices=args.devices,
         num_nodes=args.num_nodes,
+        precision="bf16-mixed",
         logger=mlflow_logger,
         # find_unused_parameters: the frozen vision encoder runs under no_grad and never gets gradients.
         strategy=DDPStrategy(find_unused_parameters=True),
         log_every_n_steps=args.log_every,
     )
+    print("[train_mini_sam_audio] Starting training...", flush=True)
     trainer.fit(module, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
     if trainer.is_global_zero:

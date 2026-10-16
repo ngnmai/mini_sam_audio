@@ -189,7 +189,10 @@ class MiniSAMAudioConfig:
         transformer=None,
         num_anchors: int = 3,
         anchor_embedding_dim: int = 128,
-        visual_ranker="imagebind",
+        visual_ranker={
+            "checkpoint": None,
+            "kind": "imagebind"
+        },
     ):
         self.in_channels = in_channels
         self.audio_codec = DACVAEConfig(**(audio_codec or {}))
