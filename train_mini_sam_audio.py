@@ -28,9 +28,9 @@ import os
 import sys
 from pathlib import Path
 
+import mlflow
 import pytorch_lightning as pl
 import torch
-from pytorch_lightning.loggers import MLFlowLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
@@ -127,26 +127,29 @@ class MiniSAMAudioLightningModule(pl.LightningModule):
 
         for name, value in losses.items():
             metric_name = f"{stage}_{name}"
-            self.log(
+            self._log_metric(
                 metric_name,
                 value,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
                 batch_size=batch_size,
-                sync_dist=True,
+                prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
             )
 
+        self._log_metric(f"{stage}_si_sdr_db", si_sdr_db, batch_size=batch_size, prog_bar=True)
+        return losses["loss_total"]
+
+    def _log_metric(self, name: str, value: torch.Tensor, batch_size: int, prog_bar: bool) -> None:
         self.log(
-            f"{stage}_si_sdr_db",
-            si_sdr_db,
+            name,
+            value,
             on_step=True,
             on_epoch=True,
-            prog_bar=True,
+            prog_bar=prog_bar,
             batch_size=batch_size,
             sync_dist=True,
         )
-        return losses["loss_total"]
+        # Only rank 0 writes to the mlflow run to avoid duplicate/racing metric writes under DDP.
+        if self.trainer.is_global_zero:
+            mlflow.log_metric(name, value.item(), step=self.trainer.global_step)
 
     def training_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
         return self._shared_step(collated, stage="train")
@@ -410,18 +413,12 @@ def main(args: argparse.Namespace) -> None:
     mlflow_tracking_uri = args.mlflow_tracking_uri or f"file:{output_dir / 'mlruns'}"
     mlflow_run_name = args.mlflow_run_name or os.environ.get("SLURM_JOB_ID")
     print(
-        f"[train_mini_sam_audio] Setting up MLflow logger "
+        f"[train_mini_sam_audio] Configuring MLflow tracking "
         f"(tracking_uri={mlflow_tracking_uri}, run_name={mlflow_run_name})...",
         flush=True,
     )
-    mlflow_logger = MLFlowLogger(
-        experiment_name=args.mlflow_experiment_name,
-        tracking_uri=mlflow_tracking_uri,
-        run_name=mlflow_run_name,
-    )
-    mlflow_logger.log_hyperparams(
-        {key: (str(value) if value is not None else "None") for key, value in vars(args).items()}
-    )
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    mlflow.set_experiment(args.mlflow_experiment_name)
 
     trainer = pl.Trainer(
         default_root_dir=str(output_dir),
@@ -430,11 +427,18 @@ def main(args: argparse.Namespace) -> None:
         devices=args.devices,
         num_nodes=args.num_nodes,
         precision="bf16-mixed",
-        logger=mlflow_logger,
+        logger=False,
         # find_unused_parameters: the frozen vision encoder runs under no_grad and never gets gradients.
         strategy=DDPStrategy(find_unused_parameters=True),
         log_every_n_steps=args.log_every,
     )
+
+    if trainer.is_global_zero:
+        mlflow.start_run(run_name=mlflow_run_name)
+        mlflow.log_params(
+            {key: (str(value) if value is not None else "None") for key, value in vars(args).items()}
+        )
+
     print("[train_mini_sam_audio] Starting training...", flush=True)
     trainer.fit(module, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
@@ -442,6 +446,8 @@ def main(args: argparse.Namespace) -> None:
         checkpoint_path = output_dir / "mini_sam_audio_final.pt"
         torch.save(module.model.state_dict(), checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
+        mlflow.log_artifact(str(checkpoint_path))
+        mlflow.end_run()
 
 
 if __name__ == "__main__":
