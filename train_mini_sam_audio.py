@@ -94,6 +94,7 @@ class MiniSAMAudioLightningModule(L.LightningModule):
         self, batch: CollatedBatch, device: torch.device, dataloader_idx: int
     ) -> CollatedBatch:
         # CollatedBatch wraps a custom `Batch` type Lightning doesn't move automatically.
+        print("transferring batch to device", flush=True)
         batch.batch = batch.batch.to(device)
         batch.target_wav = batch.target_wav.to(device)
         batch.residual_wav = batch.residual_wav.to(device)
@@ -101,8 +102,10 @@ class MiniSAMAudioLightningModule(L.LightningModule):
 
     def _shared_step(self, collated: CollatedBatch, stage: str, batch_idx: int) -> torch.Tensor:
         try:
+            print("output of model.separate_for_training", flush=True)
             outputs = self.model.separate_for_training(collated.batch)
 
+            print("separate output obtained", flush=True)
             preds = SeparationPredictions(
                 pred_target_wav=outputs.pred_target_wav,
                 pred_residual_wav=outputs.pred_residual_wav,
@@ -111,20 +114,32 @@ class MiniSAMAudioLightningModule(L.LightningModule):
                 audio_pad_mask=outputs.audio_pad_mask,
                 wav_sizes=outputs.wav_sizes,
             )
-
+            print("set up targets", flush=True)
             targets = SeparationTargets(
                 mixture_wav=collated.batch.audios.squeeze(1),
                 target_wav=collated.target_wav,
                 residual_wav=collated.residual_wav,
             )
 
+            print("set up losses", flush=True)
             losses = self.loss_fn(preds, targets)
             batch_size = collated.batch.audios.size(0)
+            # CHANGE BEGINS
+            # Decoded wavs can differ in length from the soft-label targets; crop both
+            # to their shared length so si_sdr_db sees matching shapes.
+            si_sdr_t_wav = min(outputs.pred_target_wav.size(-1), collated.target_wav.size(-1))
+            si_sdr_wav_sizes = (
+                outputs.wav_sizes.clamp(max=si_sdr_t_wav)
+                if outputs.wav_sizes is not None
+                else None
+            )
             si_sdr_db = compute_si_sdr_db(
-                outputs.pred_target_wav,
-                collated.target_wav,
-                outputs.wav_sizes,
+                outputs.pred_target_wav[..., :si_sdr_t_wav],
+                collated.target_wav[..., :si_sdr_t_wav],
+                si_sdr_wav_sizes,
             ).mean()
+            # CHANGE ENDS
+            print("computed si_sdr_db -> DONE", flush=True)
 
             for name, value in losses.items():
                 metric_name = f"{stage}_{name}"
@@ -134,7 +149,7 @@ class MiniSAMAudioLightningModule(L.LightningModule):
                     batch_size=batch_size,
                     prog_bar=metric_name.endswith("loss_total") or metric_name.endswith("si_sdr_db"),
                 )
-
+            print("logged all metrics", flush=True)
             self._log_metric(f"{stage}_si_sdr_db", si_sdr_db, batch_size=batch_size, prog_bar=True)
         except Exception as exc:
             print(
@@ -159,9 +174,11 @@ class MiniSAMAudioLightningModule(L.LightningModule):
         )
 
     def training_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
+        print("starting training step", flush=True)
         return self._shared_step(collated, stage="train", batch_idx=batch_idx)
 
     def validation_step(self, collated: CollatedBatch, batch_idx: int) -> torch.Tensor:
+        print("starting validation step", flush=True)
         return self._shared_step(collated, stage="val", batch_idx=batch_idx)
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
@@ -185,6 +202,8 @@ class MiniSAMAudioLightningModule(L.LightningModule):
         trainable_params = [param for _, param in named_trainable_params]
         if not trainable_params:
             raise RuntimeError("No trainable parameters found for optimizer setup")
+
+        print("configured optimizer with trainable parameters", flush=True)
 
         return torch.optim.AdamW(trainable_params, lr=self.hparams.lr)
 
@@ -460,7 +479,7 @@ def main(args: argparse.Namespace) -> None:
         num_nodes=args.num_nodes,
         precision="bf16-mixed",
         logger=False,
-        strategy="ddp",
+        strategy="ddp_find_unused_parameters_true",
         log_every_n_steps=args.log_every,
         detect_anomaly=args.detect_anomaly,
         num_sanity_val_steps=args.num_sanity_val_steps,

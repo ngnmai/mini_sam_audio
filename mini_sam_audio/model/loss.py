@@ -143,32 +143,47 @@ class MiniSAMAudioLoss(torch.nn.Module):
         preds: SeparationPredictions,
         targets: SeparationTargets,
     ) -> dict[str, torch.Tensor]:
-        t_wav = preds.pred_target_wav.size(-1)
-        wav_mask = None
-        if preds.wav_sizes is not None:
-            wav_mask = self._lengths_to_mask(preds.wav_sizes, t_wav)
-
-        loss_wave_l1 = self._masked_l1(
-            preds.pred_target_wav, targets.target_wav, wav_mask
+        # CHANGE BEGINS
+        # Decoded wavs can differ in length from the soft-label targets; crop both
+        # to their shared length so later subtractions broadcast correctly.
+        t_wav = min(preds.pred_target_wav.size(-1), targets.target_wav.size(-1))
+        pred_target_wav = preds.pred_target_wav[..., :t_wav]
+        pred_residual_wav = preds.pred_residual_wav[..., :t_wav]
+        target_wav = targets.target_wav[..., :t_wav]
+        mixture_wav = targets.mixture_wav[..., :t_wav]
+        residual_wav = (
+            targets.residual_wav[..., :t_wav]
+            if targets.residual_wav is not None
+            else None
         )
-        if targets.residual_wav is not None:
+        wav_sizes = (
+            preds.wav_sizes.clamp(max=t_wav) if preds.wav_sizes is not None else None
+        )
+        # CHANGE ENDS
+
+        wav_mask = None
+        if wav_sizes is not None:
+            wav_mask = self._lengths_to_mask(wav_sizes, t_wav)
+
+        loss_wave_l1 = self._masked_l1(pred_target_wav, target_wav, wav_mask)
+        if residual_wav is not None:
             loss_wave_l1 = loss_wave_l1 + self._masked_l1(
-                preds.pred_residual_wav, targets.residual_wav, wav_mask
+                pred_residual_wav, residual_wav, wav_mask
             )
 
-        pred_target_mag = self._stft_mag(preds.pred_target_wav)
-        target_mag = self._stft_mag(targets.target_wav)
+        pred_target_mag = self._stft_mag(pred_target_wav)
+        target_mag = self._stft_mag(target_wav)
         stft_mask = None
-        if preds.wav_sizes is not None:
+        if wav_sizes is not None:
             stft_lengths = (
-                torch.div(preds.wav_sizes, self.stft_hop_length, rounding_mode="floor")
+                torch.div(wav_sizes, self.stft_hop_length, rounding_mode="floor")
                 + 1
             ).clamp(max=pred_target_mag.size(-1))
             stft_mask = self._lengths_to_mask(stft_lengths, pred_target_mag.size(-1))
         loss_stft_l1 = self._masked_l1(pred_target_mag, target_mag, stft_mask)
-        if targets.residual_wav is not None:
-            pred_residual_mag = self._stft_mag(preds.pred_residual_wav)
-            residual_target_mag = self._stft_mag(targets.residual_wav)
+        if residual_wav is not None:
+            pred_residual_mag = self._stft_mag(pred_residual_wav)
+            residual_target_mag = self._stft_mag(residual_wav)
             loss_stft_l1 = loss_stft_l1 + self._masked_l1(
                 pred_residual_mag, residual_target_mag, stft_mask
             )
@@ -186,8 +201,8 @@ class MiniSAMAudioLoss(torch.nn.Module):
                 dtype=preds.pred_target_latent_128.dtype,
             )
 
-        mix_pred = preds.pred_target_wav + preds.pred_residual_wav
-        loss_mix_consistency = self._masked_l1(mix_pred, targets.mixture_wav, wav_mask)
+        mix_pred = pred_target_wav + pred_residual_wav
+        loss_mix_consistency = self._masked_l1(mix_pred, mixture_wav, wav_mask)
 
         loss_total = (
             self.w_wave_l1 * loss_wave_l1
