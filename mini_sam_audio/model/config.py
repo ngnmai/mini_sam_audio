@@ -24,6 +24,7 @@ class DACVAEConfig:
         sample_rate: int = 48_000,
         mean: float = 0.0,
         std: float = 1.0,
+        pretrained_path: str = "facebook/dacvae-watermarked",
     ):
         self.encoder_dim = encoder_dim
         self.encoder_rates = encoder_rates
@@ -37,6 +38,7 @@ class DACVAEConfig:
         self.sample_rate = sample_rate
         self.mean = mean
         self.std = std
+        self.pretrained_path = pretrained_path
 
     @property
     def hop_length(self):
@@ -193,6 +195,7 @@ class MiniSAMAudioConfig:
             "checkpoint": None,
             "kind": "imagebind"
         },
+        pretrained_backbones: bool = True,
     ):
         self.in_channels = in_channels
         self.audio_codec = DACVAEConfig(**(audio_codec or {}))
@@ -203,6 +206,7 @@ class MiniSAMAudioConfig:
         self.visual_ranker = (
             None if visual_ranker is None else parse_ranker_config(visual_ranker)
         )
+        self.pretrained_backbones = pretrained_backbones
 
 
 # ----------------------------------------------------------------------

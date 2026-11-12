@@ -372,8 +372,8 @@ def main() -> None:
     if args.init_mode == "scratch" and not backbones_trainable:
         print(
             "NOTE: scratch mode freezes audio_codec and vision_encoder as pretrained, "
-            "inference-only feature extractors (both self-provide weights via their installed "
-            "packages); only the rest of the model trains from scratch."
+            "inference-only feature extractors (the DAC VAE and PE weights are downloaded from "
+            "Hugging Face); only the rest of the model trains from scratch."
         )
     if args.init_mode == "scratch" and backbones_trainable:
         print(

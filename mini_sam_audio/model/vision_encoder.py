@@ -78,12 +78,14 @@ class VisionEncoder(torch.nn.Module, metaclass=ABCMeta):
 
 
 class PerceptionEncoder(VisionEncoder):
-    def __init__(self, cfg: PerceptionEncoderConfig):
+    def __init__(self, cfg: PerceptionEncoderConfig, pretrained: bool = False):
         self.normalize_feature = cfg.normalize_feature
         self.interpolation_mode = cfg.interpolation_mode
         self.image_size = cfg.image_size
         super().__init__(cfg)
-        self.model = pe.CLIP.from_config(cfg.name)
+        self.model = pe.CLIP.from_config(cfg.name, pretrained=pretrained)
+        if pretrained:
+            print(f"[vision] loaded pretrained {cfg.name}", flush=True)
 
     def encode(self, x):
         image_features = self.model.encode_image(x, normalize=self.normalize_feature)

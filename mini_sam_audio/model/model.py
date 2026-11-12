@@ -88,8 +88,12 @@ class MiniSAMAudio(BaseModel):
 
     def __init__(self, cfg: MiniSAMAudioConfig):
         super().__init__()
-        self.audio_codec = DACVAE(cfg.audio_codec)
-        self.vision_encoder = PerceptionEncoder(cfg.vision_encoder)
+        self.audio_codec = DACVAE(
+            cfg.audio_codec, load_pretrained=cfg.pretrained_backbones
+        )
+        self.vision_encoder = PerceptionEncoder(
+            cfg.vision_encoder, pretrained=cfg.pretrained_backbones
+        )
         self.video_feature_proj_128 = torch.nn.Conv1d(
             cfg.vision_encoder.dim, 128, kernel_size=1
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +45,7 @@ def load_student_model(
     strict: bool = True,
     map_location: str = "cpu",
     freeze_inference_backbones: Optional[bool] = None,
+    pretrained_backbones: Optional[bool] = None,
     **config_kwargs: Any,
 ):
     """Create the mini SAM-Audio student model per init_mode and optionally load weights.
@@ -51,10 +53,12 @@ def load_student_model(
     Mirrors the train_mini_sam_audio.py bootstrap contract: ``init_mode="scratch"`` builds a
     fresh model from local config with no checkpoint required; ``init_mode="checkpoint"`` loads
     weights via the existing checkpoint path. Both modes default to frozen audio_codec/
-    vision_encoder backbones, since both are pretrained via their installed packages (dacvae,
-    perception-models) regardless of init_mode, and this training method trains everything else
-    from scratch. Pass ``freeze_inference_backbones=False`` to override and keep backbones
-    trainable.
+    vision_encoder backbones, and this training method trains everything else from scratch.
+    Pass ``freeze_inference_backbones=False`` to override and keep backbones trainable.
+
+    ``pretrained_backbones=None`` means scratch downloads the pretrained DAC VAE and PE weights
+    from Hugging Face, while checkpoint mode only builds the architecture and takes the backbone
+    tensors from the checkpoint; an explicit bool overrides both modes.
     """
     if init_mode not in ("scratch", "checkpoint"):
         raise ValueError(f"init_mode must be 'scratch' or 'checkpoint', got {init_mode!r}")
@@ -66,7 +70,15 @@ def load_student_model(
     if init_mode == "checkpoint" and checkpoint_path is None:
         raise ValueError("checkpoint_path is required when init_mode='checkpoint'.")
 
-    student_config = config or MiniSAMAudioConfig(**config_kwargs)
+    if config is None:
+        student_config = MiniSAMAudioConfig(**config_kwargs)
+    elif isinstance(config, dict):
+        student_config = MiniSAMAudioConfig(**config)
+    else:
+        student_config = copy.copy(config)
+    student_config.pretrained_backbones = (
+        init_mode == "scratch" if pretrained_backbones is None else pretrained_backbones
+    )
     model = MiniSAMAudio.from_config(student_config)
 
     if init_mode == "checkpoint":
@@ -78,9 +90,8 @@ def load_student_model(
         )
         default_freeze = True
     else:
-        # Scratch mode still freezes both backbones by default: both are pretrained via their
-        # installed packages (dacvae, perception-models) regardless of init_mode, and this
-        # training method freezes both backbones while the rest of the model trains from scratch.
+        # Scratch mode loads the pretrained DAC VAE and PE weights and freezes them by default;
+        # the rest of the model trains from scratch.
         default_freeze = True
 
     should_freeze = default_freeze if freeze_inference_backbones is None else freeze_inference_backbones
@@ -182,8 +193,16 @@ def bootstrap_model_and_processor(
     processor_config_path: Optional[Path] = None,
     unfreeze_inference_backbones: bool = False,
     strict: bool = True,
+    pretrained_backbones: Optional[bool] = None,
 ) -> tuple[MiniSAMAudio, MiniSAMAudioProcessor, bool]:
-    """Construct the model/processor per init_mode, with no network access in scratch mode."""
+    """Construct the model/processor per init_mode.
+
+    Scratch mode builds the architecture from local JSON configs and downloads the pretrained
+    DAC VAE and PE weights from Hugging Face, then freezes them. Checkpoint mode builds only the
+    architecture and takes the backbone weights from the checkpoint. ``pretrained_backbones=None``
+    selects these defaults; an explicit bool overrides both modes (e.g. False on resume, where
+    the Lightning checkpoint restores the backbones).
+    """
     if init_mode == "scratch":
         if checkpoint_path is not None and not Path(checkpoint_path).exists():
             raise ValueError(
@@ -193,11 +212,9 @@ def bootstrap_model_and_processor(
         model_config, model_config_source = _build_model_config(model_config_path)
         processor, processor_config_source = _build_processor(model_config, processor_config_path)
         _validate_config_parity(model_config, processor, model_config_source, processor_config_source)
+        model_config.pretrained_backbones = True if pretrained_backbones is None else pretrained_backbones
         model = MiniSAMAudio.from_config(model_config)
-        # Scratch mode still freezes audio_codec/vision_encoder by default: both are pretrained
-        # via their installed packages (dacvae, perception-models) regardless of init_mode, and
-        # this training method freezes both backbones while the rest of the model trains from
-        # scratch.
+        # Pretrained DAC VAE and PE weights are frozen by default; the rest trains from scratch.
         freeze_backbones = not unfreeze_inference_backbones
         return model, processor, freeze_backbones
 
@@ -212,6 +229,8 @@ def bootstrap_model_and_processor(
     model_config, model_config_source = _resolve_checkpoint_model_config(
         resolved_checkpoint_path, model_config_path
     )
+    # The checkpoint carries the backbone tensors, so skip the Hugging Face download by default.
+    model_config.pretrained_backbones = False if pretrained_backbones is None else pretrained_backbones
     model = MiniSAMAudio.from_config(model_config)
     _load_weights(model, str(resolved_checkpoint_path), strict=strict)
 

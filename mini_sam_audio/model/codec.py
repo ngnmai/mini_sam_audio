@@ -40,20 +40,35 @@ class Codec(Encoder):
 
 
 class DACVAEEncoder(Encoder):
-    def __init__(self, config: DACVAEConfig) -> None:
+    def __init__(self, config: DACVAEConfig, load_pretrained: bool = False) -> None:
         super().__init__()
-        model = dacvae.DACVAE(
-            encoder_dim=config.encoder_dim,
-            encoder_rates=config.encoder_rates,
-            latent_dim=config.latent_dim,
-            decoder_dim=config.decoder_dim,
-            decoder_rates=config.decoder_rates,
-            n_codebooks=config.n_codebooks,
-            codebook_size=config.codebook_size,
-            codebook_dim=config.codebook_dim,
-            quantizer_dropout=config.quantizer_dropout,
-            sample_rate=config.sample_rate,
-        ).eval()
+        if load_pretrained:
+            model = dacvae.DACVAE.load(config.pretrained_path).eval()
+            loaded_hop = int(model.hop_length)
+            loaded_rate = int(model.sample_rate)
+            if loaded_hop != config.hop_length or loaded_rate != config.sample_rate:
+                raise ValueError(
+                    f"Pretrained DAC VAE '{config.pretrained_path}' has hop_length={loaded_hop}, "
+                    f"sample_rate={loaded_rate} but config expects "
+                    f"hop_length={config.hop_length}, sample_rate={config.sample_rate}"
+                )
+            print(
+                f"[codec] loaded pretrained DAC VAE from {config.pretrained_path}",
+                flush=True,
+            )
+        else:
+            model = dacvae.DACVAE(
+                encoder_dim=config.encoder_dim,
+                encoder_rates=config.encoder_rates,
+                latent_dim=config.latent_dim,
+                decoder_dim=config.decoder_dim,
+                decoder_rates=config.decoder_rates,
+                n_codebooks=config.n_codebooks,
+                codebook_size=config.codebook_size,
+                codebook_dim=config.codebook_dim,
+                quantizer_dropout=config.quantizer_dropout,
+                sample_rate=config.sample_rate,
+            ).eval()
         self._setup_model(model)
         self.hop_length = config.hop_length
         self.sample_rate = config.sample_rate
