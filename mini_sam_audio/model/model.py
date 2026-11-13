@@ -106,7 +106,11 @@ class MiniSAMAudio(BaseModel):
             cfg.num_anchors, cfg.anchor_embedding_dim, cfg.transformer.dim
         )
         self.timestep_emb = SinusoidalEmbedding(cfg.transformer.dim)
-        self.visual_ranker = create_ranker(cfg.visual_ranker)
+        self.visual_ranker = create_ranker(
+            cfg.visual_ranker if cfg.use_visual_ranker else None
+        )
+        if not cfg.use_visual_ranker:
+            print("[ranker] visual ranker not built (use_visual_ranker=False)", flush=True)
         self.cached_video_features_128: Optional[torch.Tensor] = None
 
     @property
@@ -377,6 +381,11 @@ class MiniSAMAudio(BaseModel):
             # We load this directly from HF, not in checkpoint
             skip_regex = re.compile("(^visual_ranker)")
             missing_keys = [x for x in missing_keys if not re.search(skip_regex, x)]
+            if self.visual_ranker is None:
+                # Old checkpoints may still carry ranker weights.
+                unexpected_keys = [
+                    x for x in unexpected_keys if not re.search(skip_regex, x)
+                ]
             if len(missing_keys) > 0 or len(unexpected_keys) > 0:
                 raise RuntimeError(
                     f"Missing keys: {missing_keys}, unexpected_keys: {unexpected_keys}"

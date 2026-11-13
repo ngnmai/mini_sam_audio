@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import torch
 
-from mini_sam_audio.model.config import MiniSAMAudioConfig
+from mini_sam_audio.model.config import ImageBindRankerConfig, MiniSAMAudioConfig
 from mini_sam_audio.model.model import MiniSAMAudio
 from mini_sam_audio.processor import MiniSAMAudioProcessor
 
@@ -37,6 +37,37 @@ def _load_weights(
     return model
 
 
+def _apply_visual_ranker_options(
+    config: MiniSAMAudioConfig,
+    use_visual_ranker: Optional[bool],
+    visual_ranker_checkpoint: Optional[Path],
+) -> None:
+    if use_visual_ranker is not None:
+        config.use_visual_ranker = use_visual_ranker
+    if visual_ranker_checkpoint is None:
+        return
+    if not config.use_visual_ranker:
+        print(
+            f"[ranker] warning: visual_ranker_checkpoint={visual_ranker_checkpoint} ignored "
+            "because the visual ranker is disabled",
+            flush=True,
+        )
+        return
+    if not isinstance(config.visual_ranker, ImageBindRankerConfig):
+        kind = getattr(config.visual_ranker, "kind", None)
+        raise ValueError(
+            f"visual_ranker_checkpoint is only supported for the imagebind ranker; "
+            f"config visual_ranker kind is {kind!r}."
+        )
+    resolved = Path(visual_ranker_checkpoint).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"visual_ranker_checkpoint not found: {resolved}")
+    # Copy so shared or default ranker config objects are never mutated.
+    ranker_config = copy.copy(config.visual_ranker)
+    ranker_config.checkpoint = str(resolved)
+    config.visual_ranker = ranker_config
+
+
 def load_student_model(
     *,
     init_mode: str = "checkpoint",
@@ -46,6 +77,8 @@ def load_student_model(
     map_location: str = "cpu",
     freeze_inference_backbones: Optional[bool] = None,
     pretrained_backbones: Optional[bool] = None,
+    use_visual_ranker: Optional[bool] = None,
+    visual_ranker_checkpoint: Optional[Path] = None,
     **config_kwargs: Any,
 ):
     """Create the mini SAM-Audio student model per init_mode and optionally load weights.
@@ -59,6 +92,9 @@ def load_student_model(
     ``pretrained_backbones=None`` means scratch downloads the pretrained DAC VAE and PE weights
     from Hugging Face, while checkpoint mode only builds the architecture and takes the backbone
     tensors from the checkpoint; an explicit bool overrides both modes.
+
+    ``use_visual_ranker=None`` keeps the config value; ``visual_ranker_checkpoint`` points the
+    ImageBind ranker at a local weights file instead of downloading it.
     """
     if init_mode not in ("scratch", "checkpoint"):
         raise ValueError(f"init_mode must be 'scratch' or 'checkpoint', got {init_mode!r}")
@@ -79,6 +115,7 @@ def load_student_model(
     student_config.pretrained_backbones = (
         init_mode == "scratch" if pretrained_backbones is None else pretrained_backbones
     )
+    _apply_visual_ranker_options(student_config, use_visual_ranker, visual_ranker_checkpoint)
     model = MiniSAMAudio.from_config(student_config)
 
     if init_mode == "checkpoint":
@@ -194,6 +231,8 @@ def bootstrap_model_and_processor(
     unfreeze_inference_backbones: bool = False,
     strict: bool = True,
     pretrained_backbones: Optional[bool] = None,
+    use_visual_ranker: Optional[bool] = None,
+    visual_ranker_checkpoint: Optional[Path] = None,
 ) -> tuple[MiniSAMAudio, MiniSAMAudioProcessor, bool]:
     """Construct the model/processor per init_mode.
 
@@ -201,7 +240,8 @@ def bootstrap_model_and_processor(
     DAC VAE and PE weights from Hugging Face, then freezes them. Checkpoint mode builds only the
     architecture and takes the backbone weights from the checkpoint. ``pretrained_backbones=None``
     selects these defaults; an explicit bool overrides both modes (e.g. False on resume, where
-    the Lightning checkpoint restores the backbones).
+    the Lightning checkpoint restores the backbones). ``use_visual_ranker=None`` keeps the config
+    value; ``visual_ranker_checkpoint`` points the ImageBind ranker at a local weights file.
     """
     if init_mode == "scratch":
         if checkpoint_path is not None and not Path(checkpoint_path).exists():
@@ -213,6 +253,7 @@ def bootstrap_model_and_processor(
         processor, processor_config_source = _build_processor(model_config, processor_config_path)
         _validate_config_parity(model_config, processor, model_config_source, processor_config_source)
         model_config.pretrained_backbones = True if pretrained_backbones is None else pretrained_backbones
+        _apply_visual_ranker_options(model_config, use_visual_ranker, visual_ranker_checkpoint)
         model = MiniSAMAudio.from_config(model_config)
         # Pretrained DAC VAE and PE weights are frozen by default; the rest trains from scratch.
         freeze_backbones = not unfreeze_inference_backbones
@@ -231,6 +272,7 @@ def bootstrap_model_and_processor(
     )
     # The checkpoint carries the backbone tensors, so skip the Hugging Face download by default.
     model_config.pretrained_backbones = False if pretrained_backbones is None else pretrained_backbones
+    _apply_visual_ranker_options(model_config, use_visual_ranker, visual_ranker_checkpoint)
     model = MiniSAMAudio.from_config(model_config)
     _load_weights(model, str(resolved_checkpoint_path), strict=strict)
 

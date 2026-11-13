@@ -198,6 +198,7 @@ class MiniSAMAudioConfig:
             "kind": "imagebind"
         },
         pretrained_backbones: bool = True,
+        use_visual_ranker: bool = True,
     ):
         self.in_channels = in_channels
         self.audio_codec = DACVAEConfig(**(audio_codec or {}))
@@ -209,6 +210,7 @@ class MiniSAMAudioConfig:
             None if visual_ranker is None else parse_ranker_config(visual_ranker)
         )
         self.pretrained_backbones = pretrained_backbones
+        self.use_visual_ranker = use_visual_ranker
 
 
 # ----------------------------------------------------------------------
