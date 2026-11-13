@@ -159,6 +159,8 @@ class EnsembleRankerConfig(RankerConfig):
 
 
 def parse_ranker_config(config_dict: dict):
+    # Copy: MiniSAMAudioConfig's shared default dict must survive repeated construction.
+    config_dict = dict(config_dict)
     kind = config_dict.pop("kind")
     match kind:
         case ImageBindRankerConfig.kind:
